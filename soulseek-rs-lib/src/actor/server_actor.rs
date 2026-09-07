@@ -1,6 +1,7 @@
 use crate::actor::{Actor, ActorHandle, ConnectionState};
 use crate::client::ClientOperation;
 use crate::dispatcher::MessageDispatcher;
+use crate::message::server::AdminMessageHandler;
 use crate::message::server::CheckPrivilegesHandler;
 use crate::message::server::ConnectToPeerHandler;
 use crate::message::server::ExcludedSearchPhrasesHandler;
@@ -47,6 +48,8 @@ use crate::{SoulseekRs, debug, error, trace, warn};
 const LOGIN_VERDICT_TIMEOUT: Duration = Duration::from_secs(30);
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+const PING_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct PeerAddress {
@@ -155,6 +158,7 @@ pub enum ServerMessage {
     /// The server is closing this connection: the same username logged in
     /// elsewhere.
     Relogged,
+    AdminMessage(String),
     SendMessage(Message),
     Login {
         username: String,
@@ -268,6 +272,7 @@ pub struct ServerActor {
     shared_folder_count: u32,
     shared_file_count: u32,
     session: SessionWatch,
+    last_ping: Option<Instant>,
 }
 
 /// The messages a client sends right after a successful login: its shared-file
@@ -321,6 +326,7 @@ impl ServerActor {
             shared_folder_count,
             shared_file_count,
             session: SessionWatch::default(),
+            last_ping: None,
         }
     }
 
@@ -380,6 +386,7 @@ impl ServerActor {
 
         handlers.register_handler(LoginHandler);
         handlers.register_handler(ReloggedHandler);
+        handlers.register_handler(AdminMessageHandler);
         handlers.register_handler(RoomListHandler);
         handlers.register_handler(GetUserStatusHandler);
         handlers.register_handler(WatchUserHandler);
@@ -586,6 +593,9 @@ impl ServerActor {
                 self.queue_message(MessageFactory::build_wishlist_search(
                     token, &query,
                 ));
+            }
+            ServerMessage::AdminMessage(text) => {
+                self.forward_to_client(ClientOperation::AdminMessage(text));
             }
             ServerMessage::WishlistInterval(seconds) => {
                 self.forward_to_client(ClientOperation::WishlistInterval(
@@ -839,6 +849,17 @@ impl ServerActor {
         }
     }
 
+    fn send_ping_if_due(&mut self) {
+        let due = self
+            .last_ping
+            .is_none_or(|sent| sent.elapsed() >= PING_INTERVAL);
+        if !due {
+            return;
+        }
+        self.last_ping = Some(Instant::now());
+        self.queue_message(MessageFactory::build_server_ping());
+    }
+
     fn queue_message(&mut self, message: Message) {
         if let Some(sender) = &self.dispatcher_sender {
             match sender.send(ServerMessage::SendMessage(message)) {
@@ -990,6 +1011,7 @@ impl Actor for ServerActor {
             ConnectionState::Connected => {
                 if self.stream.is_some() {
                     self.process_read();
+                    self.send_ping_if_due();
                 }
             }
             ConnectionState::Disconnected => {}

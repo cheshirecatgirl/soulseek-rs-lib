@@ -36,6 +36,11 @@ impl MessageFactory {
     }
 
     #[must_use]
+    pub fn build_server_ping() -> Message {
+        Message::new().write_int32(32).clone()
+    }
+
+    #[must_use]
     pub fn build_shared_folders_message(
         folder_count: u32,
         file_count: u32,

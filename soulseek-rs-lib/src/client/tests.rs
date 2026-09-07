@@ -160,17 +160,31 @@ fn build_search_response_matches_shares_and_echoes_token() {
     std::fs::write(dir.join("probe_xyzzy.bin"), b"data").unwrap();
     let shares = Shares::scan(&dir).unwrap();
 
-    let response = build_search_response(&shares, "me", 99, "xyzzy")
-        .expect("a matching share yields a response");
+    let mut attributes = std::collections::HashMap::new();
+    let matched = shares.files()[0].virtual_path.clone();
+    attributes.insert(matched, vec![(0u32, 1_411u32), (1, 253)]);
+
+    let response =
+        build_search_response(&shares, &attributes, "me", 99, "xyzzy", 1, 0)
+            .expect("a matching share yields a response");
     let mut decoded =
         crate::message::Message::new_with_data(response.get_buffer());
     decoded.set_pointer(8);
     let result = SearchResult::new_from_message(&mut decoded).unwrap();
     assert_eq!(result.username, "me");
     assert_eq!(result.token, 99);
-    assert!(result.files.iter().any(|f| f.name.contains("probe_xyzzy")));
+    let matched_file = result
+        .files
+        .iter()
+        .find(|f| f.name.contains("probe_xyzzy"))
+        .expect("the matching share is advertised");
+    assert_eq!(matched_file.attribs.get(&0), Some(&1_411));
+    assert_eq!(matched_file.attribs.get(&1), Some(&253));
 
-    assert!(build_search_response(&shares, "me", 1, "nomatch").is_none());
+    assert!(
+        build_search_response(&shares, &attributes, "me", 1, "nomatch", 1, 0)
+            .is_none()
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -198,20 +212,15 @@ fn search_file_counts_cover_every_search_without_the_results() {
     let client = Client::new("u", "p");
     {
         let mut context = client.context.write().unwrap();
-        context.searches.insert(
-            "aphex twin".to_string(),
-            Search {
-                token: 1,
-                results: vec![peer_files(2), peer_files(1)],
-            },
-        );
-        context.searches.insert(
-            "nothing yet".to_string(),
-            Search {
-                token: 2,
-                results: Vec::new(),
-            },
-        );
+        context.searches.insert("aphex twin".to_string(), {
+            let mut search = Search::new(1);
+            search.accept(peer_files(2));
+            search.accept(peer_files(1));
+            search
+        });
+        context
+            .searches
+            .insert("nothing yet".to_string(), Search::new(2));
     }
 
     let mut counts = client.search_file_counts();
@@ -230,26 +239,23 @@ fn a_search_stops_collecting_once_it_has_enough_responses() {
     // A popular query on the live network draws answers for minutes —
     // nearly a million files and gigabytes of memory for one search.
     // Surplus responders are dropped, not archived.
-    let mut search = Search {
-        token: 1,
-        results: Vec::new(),
-    };
-    for _ in 0..(crate::types::MAX_SEARCH_RESPONSES + 50) {
+    let mut search = Search::new(1);
+    for _ in 0..(crate::types::DEFAULT_MAX_SEARCH_RESPONSES + 50) {
         search.accept(peer_files(1));
     }
-    assert_eq!(search.results.len(), crate::types::MAX_SEARCH_RESPONSES);
+    assert_eq!(
+        search.results.len(),
+        crate::types::DEFAULT_MAX_SEARCH_RESPONSES
+    );
 }
 
 #[test]
 fn a_flood_of_files_fills_a_search_before_the_response_cap() {
     // A handful of whales with huge matching collections must not add up
     // to an unbounded set just because the responses are few.
-    let mut search = Search {
-        token: 1,
-        results: Vec::new(),
-    };
+    let mut search = Search::new(1);
     for _ in 0..10 {
-        search.accept(peer_files(crate::types::MAX_SEARCH_FILES / 2));
+        search.accept(peer_files(crate::types::DEFAULT_MAX_SEARCH_FILES / 2));
     }
     assert_eq!(
         search.results.len(),
@@ -816,4 +822,35 @@ fn watched_users_are_listed_in_a_stable_order() {
     context.add_watched_user("alice");
     context.add_watched_user("bob");
     assert_eq!(context.watched_users(), vec!["alice", "bob", "carol"]);
+}
+
+#[test]
+fn a_browse_listing_carries_host_supplied_attributes() {
+    let mut context = ClientContext::new();
+    context.file_attributes.insert(
+        "music\\album\\one.flac".to_string(),
+        vec![(0, 1_411), (1, 253)],
+    );
+
+    let listing = context.describe_directory(
+        "music\\album".to_string(),
+        vec![("one.flac".to_string(), 40), ("two.flac".to_string(), 50)],
+    );
+
+    assert_eq!(listing.files[0].attribute(0), Some(1_411));
+    assert_eq!(listing.files[0].attribute(1), Some(253));
+    assert!(listing.files[1].attributes.is_empty());
+}
+
+#[test]
+fn a_file_at_the_share_root_still_finds_its_attributes() {
+    let mut context = ClientContext::new();
+    context
+        .file_attributes
+        .insert("top.mp3".to_string(), vec![(0, 320)]);
+
+    let listing = context
+        .describe_directory(String::new(), vec![("top.mp3".to_string(), 12)]);
+
+    assert_eq!(listing.files[0].attribute(0), Some(320));
 }

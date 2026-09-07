@@ -1,4 +1,10 @@
-use std::{collections::HashMap, sync::mpsc::Sender};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc::Sender,
+    },
+};
 
 use crate::{error::Result, message::Message, utils::zlib::deflate};
 
@@ -69,33 +75,70 @@ pub struct SearchResult {
 pub struct Search {
     pub token: u32,
     pub results: Vec<SearchResult>,
+    files_held: usize,
 }
 
-/// Peer responses a search keeps before it stops collecting.
-///
-/// Peers answer a popular query for minutes after the window closes; left
-/// unbounded, one live-network search grew to nearly a million files and
-/// gigabytes of memory, and every consumer of the results paid for the
-/// whole set. A result set is a shortlist to pick from, not an archive of
-/// everyone who answered.
-pub const MAX_SEARCH_RESPONSES: usize = 500;
+pub const DEFAULT_MAX_SEARCH_RESPONSES: usize = 500;
 
-/// Files a search keeps across all responses, so a few peers with huge
-/// matching collections cannot blow past the response cap.
-pub const MAX_SEARCH_FILES: usize = 10_000;
+pub const DEFAULT_MAX_SEARCH_FILES: usize = 10_000;
+
+/// Files one search reply carries at most, or `0` for no limit. A query that
+/// matches a large share otherwise sends the whole thing to a stranger.
+pub const DEFAULT_MAX_SEARCH_REPLY: usize = 250;
+
+static MAX_SEARCH_REPLY: AtomicUsize =
+    AtomicUsize::new(DEFAULT_MAX_SEARCH_REPLY);
+
+/// Set how many files one reply to somebody else's search may carry.
+pub fn set_search_reply_limit(files: usize) {
+    MAX_SEARCH_REPLY.store(files, Ordering::Relaxed);
+}
+
+#[must_use]
+pub fn search_reply_limit() -> usize {
+    MAX_SEARCH_REPLY.load(Ordering::Relaxed)
+}
+
+static MAX_SEARCH_RESPONSES: AtomicUsize =
+    AtomicUsize::new(DEFAULT_MAX_SEARCH_RESPONSES);
+static MAX_SEARCH_FILES: AtomicUsize =
+    AtomicUsize::new(DEFAULT_MAX_SEARCH_FILES);
+
+pub fn set_search_limits(responses: usize, files: usize) {
+    MAX_SEARCH_RESPONSES.store(responses, Ordering::Relaxed);
+    MAX_SEARCH_FILES.store(files, Ordering::Relaxed);
+}
+
+#[must_use]
+pub fn search_limits() -> (usize, usize) {
+    (
+        MAX_SEARCH_RESPONSES.load(Ordering::Relaxed),
+        MAX_SEARCH_FILES.load(Ordering::Relaxed),
+    )
+}
 
 impl Search {
-    /// Store one peer's response, unless this search already holds enough.
-    ///
-    /// The last accepted response may carry the total past
-    /// [`MAX_SEARCH_FILES`]; responses are kept whole rather than truncated.
+    #[must_use]
+    pub const fn new(token: u32) -> Self {
+        Self {
+            token,
+            results: Vec::new(),
+            files_held: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn files_held(&self) -> usize {
+        self.files_held
+    }
+
     pub fn accept(&mut self, result: SearchResult) {
-        // ponytail: counts files linearly per call — bounded by the response
-        // cap; a running total would mean a new pub field on Search.
-        let files: usize =
-            self.results.iter().map(|result| result.files.len()).sum();
-        if self.results.len() < MAX_SEARCH_RESPONSES && files < MAX_SEARCH_FILES
-        {
+        let (max_responses, max_files) = search_limits();
+        let room_for_response =
+            max_responses == 0 || self.results.len() < max_responses;
+        let room_for_files = max_files == 0 || self.files_held < max_files;
+        if room_for_response && room_for_files {
+            self.files_held += result.files.len();
             self.results.push(result);
         }
     }
@@ -404,6 +447,69 @@ impl Transfer {
 }
 
 #[cfg(test)]
+mod search_limit_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn response(files: usize) -> SearchResult {
+        SearchResult {
+            token: 1,
+            files: vec![
+                File {
+                    username: String::new(),
+                    name: String::new(),
+                    size: 0,
+                    attribs: HashMap::new(),
+                };
+                files
+            ],
+            slots: 0,
+            speed: 0,
+            username: String::new(),
+        }
+    }
+
+    #[test]
+    fn zero_means_no_limit() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_search_limits(0, 0);
+        let mut search = Search::new(1);
+        for _ in 0..(DEFAULT_MAX_SEARCH_RESPONSES + 25) {
+            search.accept(response(1));
+        }
+        let held = search.results.len();
+        set_search_limits(
+            DEFAULT_MAX_SEARCH_RESPONSES,
+            DEFAULT_MAX_SEARCH_FILES,
+        );
+        assert_eq!(held, DEFAULT_MAX_SEARCH_RESPONSES + 25);
+    }
+
+    #[test]
+    fn a_running_total_matches_counting_every_response() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_search_limits(0, 0);
+        let mut search = Search::new(1);
+        for n in 1..=20 {
+            search.accept(response(n));
+        }
+        let counted: usize = search.results.iter().map(|r| r.files.len()).sum();
+        let held = search.files_held();
+        set_search_limits(
+            DEFAULT_MAX_SEARCH_RESPONSES,
+            DEFAULT_MAX_SEARCH_FILES,
+        );
+        assert_eq!(held, counted);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -415,7 +521,7 @@ mod tests {
         body.extend_from_slice(&0u32.to_le_bytes()); // username "" (len 0)
         body.extend_from_slice(&7u32.to_le_bytes()); // token
         body.extend_from_slice(&u32::MAX.to_le_bytes()); // n_files (hostile)
-        let compressed = crate::utils::zlib::compress_stored(&body);
+        let compressed = crate::utils::zlib::compress(&body);
         let mut message = Message::new_with_data(compressed);
         let result = SearchResult::new_from_message(&mut message)
             .expect("hostile count should parse, not error");

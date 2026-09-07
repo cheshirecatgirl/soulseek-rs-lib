@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use soulseek_rs::message::Message;
 use soulseek_rs::message::peer::{
-    FileEntry, SharedDirectory, build_file_search_response,
+    FileEntry, SharedDirectory, SharedFileEntry, build_file_search_response,
     build_shared_file_list,
 };
 use soulseek_rs::message::server::MessageFactory;
@@ -497,7 +497,13 @@ impl SeederState {
                 4 => {
                     let dir = SharedDirectory {
                         name: format!("stress\\{}", self.name),
-                        files: self.files.clone(),
+                        files: self
+                            .files
+                            .iter()
+                            .map(|(name, size)| {
+                                SharedFileEntry::bare(name.clone(), *size)
+                            })
+                            .collect(),
                     };
                     let list =
                         build_shared_file_list(std::slice::from_ref(&dir));

@@ -155,10 +155,23 @@ impl Client {
                     UploadStatus::Failed(e.to_string())
                 }
             };
-            if let Ok(mut ctx) = context.write_safe()
-                && let Some(upload) = ctx.active_uploads.get_mut(&token)
-            {
-                upload.status = status;
+            if let Ok(mut ctx) = context.write_safe() {
+                let finished =
+                    ctx.active_uploads.get_mut(&token).map(|upload| {
+                        upload.status = status;
+                        (
+                            upload
+                                .bytes_sent
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                            upload.started.elapsed().as_secs_f64(),
+                        )
+                    });
+                if let Some((sent, elapsed)) = finished
+                    && elapsed > 0.0
+                    && sent > 0
+                {
+                    ctx.record_upload_speed(sent as f64 / elapsed);
+                }
             }
             // The slot this transfer held is free now, so whoever is next in
             // line gets it without waiting for another request to arrive.

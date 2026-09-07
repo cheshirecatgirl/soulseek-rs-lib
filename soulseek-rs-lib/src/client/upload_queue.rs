@@ -179,6 +179,33 @@ impl ClientContext {
     /// `active_uploads` keeps finished transfers so `uploads()` can report them,
     /// so only the in-progress ones count — counting the whole table would let
     /// a few completed transfers wedge the queue shut forever.
+    pub(super) fn record_upload_speed(&mut self, bytes_per_sec: f64) {
+        let smoothed = if self.last_upload_speed == 0 {
+            bytes_per_sec
+        } else {
+            f64::from(self.last_upload_speed).mul_add(0.7, bytes_per_sec * 0.3)
+        };
+        self.last_upload_speed =
+            smoothed.max(0.0).min(f64::from(u32::MAX)) as u32;
+    }
+
+    pub(super) fn free_upload_slots(&self) -> u8 {
+        let free = self.upload_slots.saturating_sub(self.uploads_in_flight());
+        u8::try_from(free).unwrap_or(u8::MAX)
+    }
+
+    pub(super) const fn upload_slot_count(&self) -> usize {
+        self.upload_slots
+    }
+
+    pub(super) const fn queued_upload_count(&self) -> usize {
+        self.upload_queue.len()
+    }
+
+    pub(super) const fn advertised_speed(&self) -> u32 {
+        self.last_upload_speed
+    }
+
     fn uploads_in_flight(&self) -> usize {
         self.uploads.len()
             + self

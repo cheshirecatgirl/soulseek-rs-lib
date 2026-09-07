@@ -1,8 +1,18 @@
 use super::{
     Arc, AtomicBool, Client, DEFAULT_WISHLIST_INTERVAL, Duration, HashMap,
     Instant, Ordering, Result, RwLockExt, Search, SearchResult, ServerMessage,
-    SoulseekRs, info, md5, sleep,
+    SoulseekRs, info, sleep,
 };
+use std::sync::atomic::AtomicU32;
+
+static NEXT_SEARCH_TOKEN: AtomicU32 = AtomicU32::new(1);
+
+/// A token no live search is already using. Tokens were the first five hex
+/// digits of the query's MD5, so two queries could collide and pour results
+/// into each other.
+fn next_search_token() -> u32 {
+    NEXT_SEARCH_TOKEN.fetch_add(1, Ordering::Relaxed)
+}
 
 impl Client {
     pub fn search(
@@ -62,16 +72,12 @@ impl Client {
         let Some(handle) = &self.server_handle else {
             return Err(SoulseekRs::NotConnected);
         };
-        let hash = md5::md5(query);
-        let token = u32::from_str_radix(&hash[0..5], 16)?;
+        let token = next_search_token();
 
-        self.context.write_safe()?.searches.insert(
-            query.to_string(),
-            Search {
-                token,
-                results: Vec::new(),
-            },
-        );
+        self.context
+            .write_safe()?
+            .searches
+            .insert(query.to_string(), Search::new(token));
 
         let query = query.to_string();
         let _ = handle.send(if wishlist {

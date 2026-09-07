@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::net::TcpStream;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
@@ -13,10 +13,11 @@ use crate::trace;
 use crate::types::{Download, DownloadStatus};
 use crate::utils::path::{PART_SUFFIX, expand_tilde};
 
-const READ_BUFFER_SIZE: usize = 8192;
+const READ_BUFFER_SIZE: usize = 64 * 1024;
+const WRITE_BUFFER_SIZE: usize = 512 * 1024;
 const CANCEL_POLL: Duration = Duration::from_secs(1);
 const STALL_DEADLINE: Duration = Duration::from_secs(30);
-const PROGRESS_UPDATE_CHUNKS: usize = 15; // ~120KB (15 * 8192 bytes)
+const PROGRESS_UPDATE_CHUNKS: usize = 2;
 
 #[derive(Debug)]
 pub enum DownloadError {
@@ -126,7 +127,7 @@ fn resolve_download_path(download: &Download) -> Result<String, DownloadError> {
 /// The `.part` file a transfer streams into, so an interrupted transfer leaves
 /// behind what it managed to fetch and the next attempt can pick up from there.
 struct PartFile {
-    file: File,
+    file: BufWriter<File>,
     final_path: String,
     written: u64,
     expected: u64,
@@ -155,7 +156,7 @@ impl PartFile {
         .map_err(DownloadError::FileWriteError)?;
 
         Ok(Self {
-            file,
+            file: BufWriter::with_capacity(WRITE_BUFFER_SIZE, file),
             final_path,
             written,
             expected: download.size,
@@ -185,13 +186,14 @@ impl PartFile {
 
     /// A short transfer is a failure, and the `.part` stays put so the next
     /// attempt can resume it.
-    fn finish(self) -> Result<String, DownloadError> {
+    fn finish(mut self) -> Result<String, DownloadError> {
         if !self.is_complete() {
             return Err(DownloadError::IncompleteDownload {
                 received: self.written as usize,
                 expected: self.expected as usize,
             });
         }
+        self.file.flush().map_err(DownloadError::FileWriteError)?;
         drop(self.file);
         fs::rename(part_path(&self.final_path), &self.final_path)
             .map_err(DownloadError::FileWriteError)?;
@@ -351,8 +353,9 @@ impl DownloadPeer {
         client_context: &Arc<RwLock<ClientContext>>,
         download: Option<Download>,
     ) -> Result<(Download, String), DownloadError> {
-        let mut read_buffer = [0u8; READ_BUFFER_SIZE];
+        let mut read_buffer = vec![0u8; READ_BUFFER_SIZE];
         let mut chunk_counter = 0usize;
+        let mut bytes_since_last_update = 0usize;
         let mut last_update_time = Instant::now();
         let mut last_data = Instant::now();
         stream
@@ -414,11 +417,10 @@ impl DownloadPeer {
 
                     part.write(data)?;
                     chunk_counter += 1;
+                    bytes_since_last_update += bytes_read;
 
                     if chunk_counter.is_multiple_of(PROGRESS_UPDATE_CHUNKS) {
                         let elapsed = last_update_time.elapsed().as_secs_f64();
-                        let bytes_since_last_update =
-                            PROGRESS_UPDATE_CHUNKS * READ_BUFFER_SIZE;
                         let speed = if elapsed > 0.0 {
                             bytes_since_last_update as f64 / elapsed
                         } else {
@@ -430,6 +432,7 @@ impl DownloadPeer {
                             part.written,
                             speed,
                         );
+                        bytes_since_last_update = 0;
                         last_update_time = Instant::now();
                     }
 

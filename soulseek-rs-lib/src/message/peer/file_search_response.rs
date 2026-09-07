@@ -1,7 +1,7 @@
 use crate::message::{Message, MessageHandler};
 use crate::peer::PeerMessage;
 use crate::types::SearchResult;
-use crate::utils::zlib::compress_stored;
+use crate::utils::zlib::compress;
 use std::sync::mpsc::Sender;
 
 /// A borrowed view of one file to advertise in a search response, kept
@@ -41,7 +41,7 @@ pub fn build_file_search_response(
     }
     payload.write_int8(slots).write_int32(speed).write_int32(0); // free upload slots / queue length (well-formed trailer)
 
-    let compressed = compress_stored(&payload.get_data());
+    let compressed = compress(&payload.get_data());
     Message::new()
         .write_int32(9)
         .write_raw_bytes(compressed)
@@ -50,7 +50,7 @@ pub fn build_file_search_response(
 
 pub struct FileSearchResponse;
 impl MessageHandler<PeerMessage> for FileSearchResponse {
-    fn get_code(&self) -> u8 {
+    fn get_code(&self) -> u32 {
         9
     }
     fn handle(&self, message: &mut Message, sender: Sender<PeerMessage>) {

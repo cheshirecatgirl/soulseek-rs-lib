@@ -525,6 +525,94 @@ impl Client {
                             }
                         }
                     }
+                    ClientOperation::UserInfoRequested { requester_key } => {
+                        let (registry, message) =
+                            match client_context.read_safe() {
+                                Ok(ctx) => {
+                                    let info = crate::message::peer::PeerInfo {
+                                        description: String::new(),
+                                        picture: None,
+                                        upload_slots: ctx.upload_slot_count()
+                                            as u32,
+                                        queue_length: ctx.queued_upload_count()
+                                            as u32,
+                                        free_slots: ctx.free_upload_slots() > 0,
+                                    };
+                                    (
+                                        ctx.peer_registry.clone(),
+                                        crate::message::peer::build_user_info(
+                                            &info,
+                                        ),
+                                    )
+                                }
+                                Err(_) => continue,
+                            };
+                        if let Some(registry) = registry {
+                            let _ = registry.send_to_peer(
+                                &requester_key,
+                                PeerMessage::SendMessage(message),
+                            );
+                        }
+                    }
+                    ClientOperation::PeerInfo { username, info } => {
+                        if let Ok(mut ctx) = client_context.write_safe() {
+                            ctx.store_peer_info(username, info);
+                        }
+                    }
+                    ClientOperation::FolderContentsRequested {
+                        requester_key,
+                        token,
+                        folder,
+                    } => {
+                        // One folder, rather than making them take the whole
+                        // share to look at it.
+                        let (registry, message) =
+                            match client_context.read_safe() {
+                                Ok(ctx) => {
+                                    let dirs = ctx
+                                        .shares
+                                        .directories()
+                                        .into_iter()
+                                        .filter(|(name, _)| name == &folder)
+                                        .map(|(name, files)| {
+                                            ctx.describe_directory(name, files)
+                                        })
+                                        .collect::<Vec<_>>();
+                                    (
+                                    ctx.peer_registry.clone(),
+                                    crate::message::peer::build_folder_contents(
+                                        token, &folder, &dirs,
+                                    ),
+                                )
+                                }
+                                Err(_) => continue,
+                            };
+                        if let Some(registry) = registry {
+                            let _ = registry.send_to_peer(
+                                &requester_key,
+                                PeerMessage::SendMessage(message),
+                            );
+                        }
+                    }
+                    ClientOperation::FolderContents {
+                        username,
+                        token: _,
+                        folder,
+                        directories,
+                    } => {
+                        if let Ok(mut ctx) = client_context.write_safe() {
+                            ctx.store_folder_contents(
+                                username,
+                                folder,
+                                directories,
+                            );
+                        }
+                    }
+                    ClientOperation::AdminMessage(text) => {
+                        if let Ok(mut ctx) = client_context.write_safe() {
+                            ctx.push_admin_message(text);
+                        }
+                    }
                     ClientOperation::WishlistInterval(seconds) => {
                         if let Ok(mut ctx) = client_context.write_safe() {
                             ctx.wishlist_interval = Some(seconds);
@@ -590,9 +678,12 @@ impl Client {
                         let response = match client_context.read_safe() {
                             Ok(ctx) => build_search_response(
                                 &ctx.shares,
+                                &ctx.file_attributes,
                                 &own_username,
                                 token,
                                 &query,
+                                ctx.free_upload_slots(),
+                                ctx.advertised_speed(),
                             ),
                             Err(e) => {
                                 error!("[client] IncomingSearch read: {}", e);
@@ -763,10 +854,7 @@ impl Client {
                                     .directories()
                                     .into_iter()
                                     .map(|(name, files)| {
-                                        crate::message::peer::SharedDirectory {
-                                            name,
-                                            files,
-                                        }
+                                        ctx.describe_directory(name, files)
                                     })
                                     .collect::<Vec<_>>();
                                 (

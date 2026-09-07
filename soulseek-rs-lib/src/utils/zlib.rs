@@ -83,8 +83,14 @@ pub fn deflate(input: &[u8]) -> Result<Vec<u8>> {
             "preset dictionary not supported".to_string(),
         ));
     }
-    let out = inflate(&mut r).map_err(SoulseekRs::CompressionError)?; // decompress DEFLATE data
-    let _adler32 = r.read_bytes(4)?; // Adler-32 checksum (for this exercise, we ignore it)
+    let out = inflate(&mut r).map_err(SoulseekRs::CompressionError)?;
+    // `read_bytes` assembles little-endian; the zlib trailer is big-endian.
+    let claimed = r.read_bytes(4)?.swap_bytes();
+    if claimed != adler32(&out) {
+        return Err(SoulseekRs::CompressionError(
+            "adler32 checksum failed".to_string(),
+        ));
+    }
     Ok(out)
 }
 
@@ -110,6 +116,172 @@ pub fn compress_stored(data: &[u8]) -> Vec<u8> {
             out.extend_from_slice(chunk);
         }
     }
+    out.extend_from_slice(&adler32(data).to_be_bytes());
+    out
+}
+
+struct BitWriter {
+    out: Vec<u8>,
+    bit: u32,
+    held: u32,
+}
+
+impl BitWriter {
+    const fn new() -> Self {
+        Self {
+            out: Vec::new(),
+            bit: 0,
+            held: 0,
+        }
+    }
+
+    fn bits(&mut self, value: u32, count: u32) {
+        self.held |= value << self.bit;
+        self.bit += count;
+        while self.bit >= 8 {
+            self.out.push((self.held & 0xFF) as u8);
+            self.held >>= 8;
+            self.bit -= 8;
+        }
+    }
+
+    fn code(&mut self, value: u32, count: u32) {
+        for i in (0..count).rev() {
+            self.bits((value >> i) & 1, 1);
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.bit > 0 {
+            self.out.push((self.held & 0xFF) as u8);
+        }
+        self.out
+    }
+}
+
+const MIN_MATCH: usize = 3;
+const MAX_MATCH: usize = 258;
+const WINDOW: usize = 32768;
+const HASH_BITS: u32 = 15;
+const HASH_SIZE: usize = 1 << HASH_BITS;
+
+fn literal(w: &mut BitWriter, byte: u8) {
+    let symbol = u32::from(byte);
+    if symbol < 144 {
+        w.code(0x30 + symbol, 8);
+    } else {
+        w.code(0x190 + symbol - 144, 9);
+    }
+}
+
+const fn length_symbol(length: usize) -> usize {
+    let mut i = 0;
+    while i + 1 < LENGTH_BASE.len() && LENGTH_BASE[i + 1] as usize <= length {
+        i += 1;
+    }
+    i
+}
+
+const fn dist_symbol(distance: usize) -> usize {
+    let mut i = 0;
+    while i + 1 < DISTANCE_BASE.len()
+        && DISTANCE_BASE[i + 1] as usize <= distance
+    {
+        i += 1;
+    }
+    i
+}
+
+fn emit_length(w: &mut BitWriter, length: usize) {
+    let i = length_symbol(length);
+    let symbol = 257 + i;
+    if symbol < 280 {
+        w.code((symbol - 256) as u32, 7);
+    } else {
+        w.code(0xC0 + (symbol - 280) as u32, 8);
+    }
+    let extra = LENGTH_EXTRA_BITS[i] as u32;
+    if extra > 0 {
+        w.bits(length as u32 - LENGTH_BASE[i], extra);
+    }
+}
+
+fn emit_distance(w: &mut BitWriter, distance: usize) {
+    let i = dist_symbol(distance);
+    w.code(i as u32, 5);
+    let extra = DISTANCE_EXTRA_BITS[i] as u32;
+    if extra > 0 {
+        w.bits(distance as u32 - DISTANCE_BASE[i], extra);
+    }
+}
+
+#[must_use]
+pub fn compress(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01];
+    let mut w = BitWriter::new();
+    w.bits(1, 1);
+    w.bits(1, 2);
+
+    let mut head = vec![usize::MAX; HASH_SIZE];
+    let mut prev = vec![usize::MAX; data.len().max(1)];
+    let hash = |d: &[u8], i: usize| -> usize {
+        let three = u32::from(d[i]) << 16
+            | u32::from(d[i + 1]) << 8
+            | u32::from(d[i + 2]);
+        (three.wrapping_mul(2_654_435_761) >> (32 - HASH_BITS)) as usize
+    };
+
+    let mut i = 0;
+    while i < data.len() {
+        let mut best_len = 0;
+        let mut best_dist = 0;
+        if i + MIN_MATCH <= data.len() {
+            let h = hash(data, i);
+            let mut candidate = head[h];
+            let mut tries = 128;
+            while candidate != usize::MAX
+                && tries > 0
+                && i - candidate <= WINDOW
+            {
+                let max = MAX_MATCH.min(data.len() - i);
+                let mut len = 0;
+                while len < max && data[candidate + len] == data[i + len] {
+                    len += 1;
+                }
+                if len > best_len {
+                    best_len = len;
+                    best_dist = i - candidate;
+                    if len == max {
+                        break;
+                    }
+                }
+                candidate = prev[candidate];
+                tries -= 1;
+            }
+            prev[i] = head[h];
+            head[h] = i;
+        }
+
+        if best_len >= MIN_MATCH {
+            emit_length(&mut w, best_len);
+            emit_distance(&mut w, best_dist);
+            for step in 1..best_len {
+                let at = i + step;
+                if at + MIN_MATCH <= data.len() {
+                    let h = hash(data, at);
+                    prev[at] = head[h];
+                    head[h] = at;
+                }
+            }
+            i += best_len;
+        } else {
+            literal(&mut w, data[i]);
+            i += 1;
+        }
+    }
+
+    w.code(0, 7);
+    out.extend_from_slice(&w.finish());
     out.extend_from_slice(&adler32(data).to_be_bytes());
     out
 }
@@ -468,10 +640,11 @@ mod tests {
 
     #[test]
     fn test_deflate() {
-        // Test data from the original test - this should work with our new implementation
+        // The trailer was wrong here (18 0B 04 5D for a real 19 6B 04 3D),
+        // which the skipped checksum hid.
         let data = vec![
             120, 156, 203, 72, 205, 201, 201, 87, 8, 207, 47, 202, 73, 1, 0,
-            24, 11, 4, 93,
+            25, 107, 4, 61,
         ];
         let result = deflate(&data);
         assert!(result.is_ok());
@@ -528,5 +701,83 @@ mod tests {
         let decompressed = result.unwrap();
 
         assert_eq!(decompressed, expect);
+    }
+}
+
+#[cfg(test)]
+mod compress_tests {
+    use super::{compress, compress_stored, deflate};
+
+    fn shared_list() -> Vec<u8> {
+        let mut out = Vec::new();
+        for artist in ["Aphex Twin", "Boards of Canada", "Coil", "Autechre"] {
+            for album in [
+                "Selected Ambient Works",
+                "Geogaddi",
+                "Musick to Play in the Dark",
+            ] {
+                for n in 1..=14 {
+                    out.extend_from_slice(
+                        format!("@@music\\FLAC\\{artist}\\{album}\\{n:02} Track.flac\n")
+                            .as_bytes(),
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_shape_survives_a_round_trip() {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut noise = |n: usize| -> Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    (seed >> 24) as u8
+                })
+                .collect()
+        };
+        let cases = vec![
+            Vec::new(),
+            vec![0],
+            vec![0x41; 1],
+            vec![0x41; 258],
+            vec![0x41; 70_000],
+            b"the same words the same words the same words".to_vec(),
+            shared_list(),
+            noise(1),
+            noise(4096),
+            noise(70_000),
+        ];
+        for data in cases {
+            let packed = compress(&data);
+            assert_eq!(deflate(&packed).unwrap(), data, "{} bytes", data.len());
+        }
+    }
+
+    #[test]
+    fn a_shared_file_list_actually_compresses() {
+        // A broken match finder still emits valid zlib, just no smaller, so
+        // only a ratio catches it.
+        let data = shared_list();
+        let packed = compress(&data);
+        let stored = compress_stored(&data);
+        assert!(
+            packed.len() * 4 < stored.len(),
+            "expected well under a quarter, got {} against {}",
+            packed.len(),
+            stored.len()
+        );
+    }
+
+    #[test]
+    fn a_long_run_reaches_the_longest_match() {
+        // Runs past 258 bytes split across matches, where a length-table
+        // off-by-one shows up.
+        let data = vec![0x5A; 100_000];
+        assert_eq!(deflate(&compress(&data)).unwrap(), data);
     }
 }

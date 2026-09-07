@@ -17,7 +17,7 @@ use crate::{
     peer::{ConnectionType, DownloadPeer, Peer, PeerMessage, listen::Listen},
     shares::Shares,
     types::{Download, Search, SearchResult},
-    utils::{lock::RwLockExt, md5},
+    utils::lock::RwLockExt,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -136,28 +136,39 @@ fn upload_speed(
 /// nothing matches. `own_username` is the name the searcher will download from.
 fn build_search_response(
     shares: &Shares,
+    attributes: &HashMap<String, Vec<(u32, u32)>>,
     own_username: &str,
     token: u32,
     query: &str,
+    free_slots: u8,
+    speed: u32,
 ) -> Option<crate::message::Message> {
     let matches = shares.search(query);
     if matches.is_empty() {
         return None;
     }
+    let cap = crate::types::search_reply_limit();
+    let matches = if cap > 0 && matches.len() > cap {
+        &matches[..cap]
+    } else {
+        &matches[..]
+    };
     let entries: Vec<FileEntry> = matches
         .iter()
         .map(|f| FileEntry {
             name: &f.virtual_path,
             size: f.size,
-            attribs: &f.attributes,
+            attribs: attributes
+                .get(&f.virtual_path)
+                .map_or(f.attributes.as_slice(), Vec::as_slice),
         })
         .collect();
     Some(build_file_search_response(
         own_username,
         token,
         &entries,
-        1,
-        0,
+        free_slots,
+        speed,
     ))
 }
 
@@ -296,6 +307,25 @@ pub enum ClientOperation {
     /// The server announced how many seconds must pass between wishlist
     /// searches.
     WishlistInterval(u32),
+    AdminMessage(String),
+    UserInfoRequested {
+        requester_key: String,
+    },
+    PeerInfo {
+        username: String,
+        info: crate::message::peer::PeerInfo,
+    },
+    FolderContentsRequested {
+        requester_key: String,
+        token: u32,
+        folder: String,
+    },
+    FolderContents {
+        username: String,
+        token: u32,
+        folder: String,
+        directories: Vec<crate::message::peer::SharedDirectory>,
+    },
     /// Everyone the server counts as privileged; they sort ahead of others in
     /// our upload queue.
     PrivilegedUsers(Vec<String>),
@@ -313,12 +343,19 @@ pub struct ClientContext {
     server_sender: Option<Sender<ServerMessage>>,
     searches: HashMap<String, Search>,
     private_messages: Vec<UserMessage>,
+    admin_messages: Vec<String>,
+    folder_contents:
+        HashMap<String, Vec<crate::message::peer::SharedDirectory>>,
+    peer_info: HashMap<String, crate::message::peer::PeerInfo>,
     /// Correlation tokens for server-brokered (firewalled) connections, mapping
     /// a token we sent in a ConnectToPeer to the peer we expect back.
     pending_connect_tokens: HashMap<u32, (String, Instant)>,
     max_peers: Arc<AtomicUsize>,
     /// Files we share with peers (read-only after connect).
     pub shares: Arc<Shares>,
+    /// Audio attributes the host has supplied, keyed by virtual path. The
+    /// library reads no tags itself.
+    file_attributes: HashMap<String, Vec<(u32, u32)>>,
     /// The directories the current share index was built from.
     pub shared_directories: Vec<String>,
     /// Peer listen addresses learned from GetPeerAddress responses.
@@ -364,6 +401,7 @@ pub struct ClientContext {
     upload_seq: u64,
     /// How many uploads may be in flight at once.
     upload_slots: usize,
+    last_upload_speed: u32,
     /// Queued-upload states that came and went between two polls of
     /// [`Client::uploads`]. A caller sampling that snapshot would otherwise
     /// never see a peer that queued and was served inside one poll interval,
@@ -423,9 +461,13 @@ impl ClientContext {
             server_sender: None,
             searches: HashMap::new(),
             private_messages: Vec::new(),
+            admin_messages: Vec::new(),
+            folder_contents: HashMap::new(),
+            peer_info: HashMap::new(),
             pending_connect_tokens: HashMap::new(),
             max_peers: Arc::new(AtomicUsize::new(DEFAULT_MAX_PEERS)),
             shares: Arc::new(Shares::empty()),
+            file_attributes: HashMap::new(),
             shared_directories: Vec::new(),
             peer_addresses: HashMap::new(),
             pending_peer_messages: HashMap::new(),
@@ -446,6 +488,7 @@ impl ClientContext {
             upload_queue: Vec::new(),
             upload_seq: 0,
             upload_slots: DEFAULT_UPLOAD_SLOTS,
+            last_upload_speed: 0,
             upload_events: Vec::new(),
             downloads: DownloadStore::new(),
             actor_system,
@@ -769,6 +812,90 @@ impl ClientContext {
     pub fn take_private_messages(&mut self) -> Vec<UserMessage> {
         std::mem::take(&mut self.private_messages)
     }
+
+    pub fn push_admin_message(&mut self, text: String) {
+        self.admin_messages.push(text);
+    }
+
+    pub fn take_admin_messages(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.admin_messages)
+    }
+
+    pub fn store_folder_contents(
+        &mut self,
+        username: String,
+        folder: String,
+        directories: Vec<crate::message::peer::SharedDirectory>,
+    ) {
+        self.folder_contents
+            .insert(folder_key(&username, &folder), directories);
+    }
+
+    pub fn take_folder_contents(
+        &mut self,
+        username: &str,
+        folder: &str,
+    ) -> Option<Vec<crate::message::peer::SharedDirectory>> {
+        self.folder_contents.remove(&folder_key(username, folder))
+    }
+}
+
+impl ClientContext {
+    pub fn store_peer_info(
+        &mut self,
+        username: String,
+        info: crate::message::peer::PeerInfo,
+    ) {
+        self.peer_info.insert(username, info);
+    }
+
+    pub fn take_peer_info(
+        &mut self,
+        username: &str,
+    ) -> Option<crate::message::peer::PeerInfo> {
+        self.peer_info.remove(username)
+    }
+}
+
+impl ClientContext {
+    /// The attributes advertised for one virtual path.
+    #[must_use]
+    pub fn attributes_for(&self, virtual_path: &str) -> Vec<(u32, u32)> {
+        self.file_attributes
+            .get(virtual_path)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// One entry of [`Shares::directories`] in wire form, with whatever
+    /// attributes the host has supplied.
+    #[must_use]
+    pub fn describe_directory(
+        &self,
+        name: String,
+        files: Vec<(String, u64)>,
+    ) -> crate::message::peer::SharedDirectory {
+        let files = files
+            .into_iter()
+            .map(|(base, size)| {
+                let virtual_path = if name.is_empty() {
+                    base.clone()
+                } else {
+                    format!("{name}\\{base}")
+                };
+                crate::message::peer::SharedFileEntry {
+                    attributes: self.attributes_for(&virtual_path),
+                    name: base,
+                    size,
+                }
+            })
+            .collect();
+        crate::message::peer::SharedDirectory { name, files }
+    }
+}
+
+fn folder_key(username: &str, folder: &str) -> String {
+    format!("{username}\u{0}{folder}")
 }
 pub struct Client {
     enable_listen: bool,
@@ -908,6 +1035,37 @@ impl Client {
             }
             found
         })
+    }
+
+    /// Attach audio attributes to shared files, as
+    /// `(virtual_path, code, value)`: code 0 bitrate in kbps, 1 duration in
+    /// seconds, 2 VBR, 4 sample rate, 5 bit depth. Merged into what is
+    /// already known, so several passes can build it up.
+    ///
+    /// # Errors
+    /// Returns [`SoulseekRs::NotConnected`] if the client is not connected.
+    pub fn describe_shared_files(
+        &self,
+        entries: Vec<(String, u32, u32)>,
+    ) -> Result<()> {
+        let mut ctx = self.context.write_safe()?;
+        for (virtual_path, code, value) in entries {
+            let slot = ctx.file_attributes.entry(virtual_path).or_default();
+            match slot.iter_mut().find(|(c, _)| *c == code) {
+                Some(existing) => existing.1 = value,
+                None => slot.push((code, value)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Forget every attribute supplied through [`Client::describe_shared_files`].
+    ///
+    /// # Errors
+    /// Returns [`SoulseekRs::NotConnected`] if the client is not connected.
+    pub fn clear_shared_file_attributes(&self) -> Result<()> {
+        self.context.write_safe()?.file_attributes.clear();
+        Ok(())
     }
 
     /// Replace the shared directories at runtime: rescan into a fresh

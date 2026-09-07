@@ -4,6 +4,13 @@ use super::{
 };
 use crate::types::{RoomUserStats, UserInfo};
 
+static NEXT_FOLDER_TOKEN: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(1);
+
+fn next_folder_token() -> u32 {
+    NEXT_FOLDER_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Client {
     /// Send a private message to another user via the server.
     ///
@@ -261,6 +268,108 @@ impl Client {
         Ok(())
     }
 
+    /// Request one folder from a peer rather than their whole share, named
+    /// as it appears in their listing. Read the reply with
+    /// [`Client::take_folder_contents`]. Not every client answers code 36, so
+    /// fall back to [`Client::browse_user`] after a wait.
+    ///
+    /// # Errors
+    /// Returns an error if the client's context lock is poisoned.
+    pub fn request_folder_contents(
+        &self,
+        username: &str,
+        folder: &str,
+    ) -> Result<()> {
+        let token = next_folder_token();
+        let request =
+            crate::message::peer::build_folder_contents_request(token, folder);
+        let (connected, registry) = {
+            let ctx = self.context.read_safe()?;
+            (
+                ctx.peer_registry
+                    .as_ref()
+                    .is_some_and(|r| r.contains(username)),
+                ctx.peer_registry.clone(),
+            )
+        };
+        if connected {
+            if let Some(registry) = registry {
+                let _ = registry
+                    .send_to_peer(username, PeerMessage::SendMessage(request));
+            }
+        } else {
+            self.context
+                .write_safe()?
+                .queue_peer_message(username, request);
+            if let Some(handle) = &self.server_handle {
+                let _ = handle
+                    .send(ServerMessage::GetPeerAddress(username.to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Ask a peer directly for its description, picture, upload slots and
+    /// queue length; read the reply with [`Client::take_peer_info`].
+    /// [`Client::request_user_info`] asks the server instead, and the server
+    /// only knows status and share counts.
+    ///
+    /// # Errors
+    /// Returns an error if the client's context lock is poisoned.
+    pub fn request_peer_info(&self, username: &str) -> Result<()> {
+        let request = crate::message::peer::build_user_info_request();
+        let (connected, registry) = {
+            let ctx = self.context.read_safe()?;
+            (
+                ctx.peer_registry
+                    .as_ref()
+                    .is_some_and(|r| r.contains(username)),
+                ctx.peer_registry.clone(),
+            )
+        };
+        if connected {
+            if let Some(registry) = registry {
+                let _ = registry
+                    .send_to_peer(username, PeerMessage::SendMessage(request));
+            }
+        } else {
+            self.context
+                .write_safe()?
+                .queue_peer_message(username, request);
+            if let Some(handle) = &self.server_handle {
+                let _ = handle
+                    .send(ServerMessage::GetPeerAddress(username.to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove and return what a peer said about itself, if it has answered.
+    #[must_use]
+    pub fn take_peer_info(
+        &self,
+        username: &str,
+    ) -> Option<crate::message::peer::PeerInfo> {
+        self.context
+            .write_safe()
+            .ok()
+            .and_then(|mut ctx| ctx.take_peer_info(username))
+    }
+
+    /// Remove and return one folder requested via
+    /// [`Client::request_folder_contents`], if it has arrived.
+    #[must_use]
+    pub fn take_folder_contents(
+        &self,
+        username: &str,
+        folder: &str,
+    ) -> Option<Vec<crate::message::peer::SharedDirectory>> {
+        self.context
+            .write_safe()
+            .ok()
+            .and_then(|mut ctx| ctx.take_folder_contents(username, folder))
+    }
+
     /// Remove and return a peer's shared-file listing requested via
     /// [`Client::browse_user`], if it has arrived.
     #[must_use]
@@ -281,6 +390,17 @@ impl Client {
             Ok(mut ctx) => ctx.take_private_messages(),
             Err(e) => {
                 error!("[client] take_private_messages: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn take_admin_messages(&self) -> Vec<String> {
+        match self.context.write_safe() {
+            Ok(mut ctx) => ctx.take_admin_messages(),
+            Err(e) => {
+                error!("[client] take_admin_messages: {}", e);
                 Vec::new()
             }
         }

@@ -1791,7 +1791,7 @@ fn a_runtime_share_update_is_visible_to_browsers() {
     assert!(
         directories
             .iter()
-            .any(|d| d.files.iter().any(|(name, _)| name == "late.mp3")),
+            .any(|d| d.files.iter().any(|f| f.name == "late.mp3")),
         "the listing should include the file shared at runtime"
     );
 
@@ -1841,7 +1841,7 @@ fn browse_a_peers_shared_files() {
     assert!(
         directories
             .iter()
-            .any(|d| { d.files.iter().any(|(name, _)| name == "track.flac") }),
+            .any(|d| { d.files.iter().any(|f| f.name == "track.flac") }),
         "the listing should include the shared file"
     );
 
@@ -1902,7 +1902,7 @@ fn browse_a_firewalled_peer_via_broker() {
     assert!(
         directories
             .iter()
-            .any(|d| d.files.iter().any(|(name, _)| name == "hidden.flac")),
+            .any(|d| d.files.iter().any(|f| f.name == "hidden.flac")),
         "the brokered listing should include the shared file"
     );
 
@@ -1972,7 +1972,7 @@ fn a_third_party_client_browses_our_shares_directly() {
     assert!(
         directories
             .iter()
-            .any(|d| d.files.iter().any(|(name, _)| name == "track.flac")),
+            .any(|d| d.files.iter().any(|f| f.name == "track.flac")),
         "the listing should include the shared file, got {directories:?}"
     );
 
@@ -2080,7 +2080,7 @@ fn a_third_party_client_browses_our_shares_via_the_server_broker() {
     assert!(
         directories
             .iter()
-            .any(|d| d.files.iter().any(|(name, _)| name == "brokered.flac")),
+            .any(|d| d.files.iter().any(|f| f.name == "brokered.flac")),
         "the brokered listing should include the shared file, got {directories:?}"
     );
 
@@ -2133,7 +2133,7 @@ fn a_stalled_peer_connection_does_not_wedge_the_listener() {
     assert!(
         directories
             .iter()
-            .any(|d| d.files.iter().any(|(name, _)| name == "still.flac")),
+            .any(|d| d.files.iter().any(|f| f.name == "still.flac")),
         "the listing should include the shared file, got {directories:?}"
     );
 

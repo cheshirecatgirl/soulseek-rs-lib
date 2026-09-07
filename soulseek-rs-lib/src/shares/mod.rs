@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 pub struct SharedFile {
     /// Backslash-separated path exposed to peers, e.g. `music\album\song.mp3`.
     pub virtual_path: String,
+    pub search_key: String,
     /// The real filesystem path used to serve the bytes.
     pub real_path: PathBuf,
     pub size: u64,
@@ -106,10 +107,7 @@ impl Shares {
         }
         self.files
             .iter()
-            .filter(|f| {
-                let haystack = f.virtual_path.to_lowercase();
-                terms.iter().all(|t| haystack.contains(t.as_str()))
-            })
+            .filter(|f| terms.iter().all(|t| f.search_key.contains(t.as_str())))
             .collect()
     }
 
@@ -156,7 +154,9 @@ impl Shares {
     }
 }
 
-fn root_display_name(root: &Path) -> String {
+/// The name peers see a shared root as.
+#[must_use]
+pub fn root_display_name(root: &Path) -> String {
     root.file_name().map_or_else(
         || "shared".to_string(),
         |n| n.to_string_lossy().into_owned(),
@@ -199,8 +199,10 @@ fn scan_root(
                     continue;
                 }
                 let virtual_path = virtual_path_for(root_name, root, &path);
+                let search_key = virtual_path.to_lowercase();
                 files.push(SharedFile {
                     virtual_path,
+                    search_key,
                     real_path: path,
                     size: meta.len(),
                     attributes: Vec::new(),
@@ -214,7 +216,8 @@ fn scan_root(
 
 /// Build the peer-facing virtual path for `path` under `root`: the root's own
 /// name followed by the backslash-separated components relative to it.
-fn virtual_path_for(root_name: &str, root: &Path, path: &Path) -> String {
+#[must_use]
+pub fn virtual_path_for(root_name: &str, root: &Path, path: &Path) -> String {
     let rel = path.strip_prefix(root).unwrap_or(path);
     let mut parts = vec![root_name.to_string()];
     for component in rel.components() {
