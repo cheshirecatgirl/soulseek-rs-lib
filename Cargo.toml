@@ -1,5 +1,5 @@
 [workspace]
-members = ["soulseek-rs-lib", "soulseek-rs"]
+members = ["soulseek-rs-lib"]
 resolver = "2"
 
 [workspace.package]
