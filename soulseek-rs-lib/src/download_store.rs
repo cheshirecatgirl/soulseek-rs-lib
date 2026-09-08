@@ -214,6 +214,7 @@ mod tests {
             sender: mpsc::channel().0,
             queue_position: None,
             metadata: DownloadMetadata::default(),
+            preview_bytes: None,
         }
     }
 

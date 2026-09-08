@@ -103,6 +103,34 @@ impl Client {
         )
     }
 
+    /// Fetch only the first `bytes` of a file, to listen to before deciding.
+    ///
+    /// The transfer ends at the cap and what lands is a fragment. Whether a
+    /// fragment plays is a property of the container, not of this call: MP3,
+    /// FLAC, Ogg, Opus and WAV carry everything a decoder needs at the front,
+    /// while MP4 and its relatives usually keep their index at the end and
+    /// cannot be cut short. The caller knows the extension and decides.
+    ///
+    /// # Errors
+    /// Returns [`SoulseekRs::NotConnected`] if the client is not connected.
+    pub fn preview(
+        &self,
+        filename: String,
+        username: String,
+        size: u64,
+        download_directory: String,
+        bytes: u64,
+    ) -> Result<(Download, Receiver<DownloadStatus>)> {
+        self.start_download(
+            filename,
+            username,
+            size,
+            download_directory,
+            DownloadMetadata::default(),
+            Some(bytes.max(1)),
+        )
+    }
+
     pub fn download_with_metadata(
         &self,
         filename: String,
@@ -110,6 +138,25 @@ impl Client {
         size: u64,
         download_directory: String,
         metadata: DownloadMetadata,
+    ) -> Result<(Download, Receiver<DownloadStatus>)> {
+        self.start_download(
+            filename,
+            username,
+            size,
+            download_directory,
+            metadata,
+            None,
+        )
+    }
+
+    fn start_download(
+        &self,
+        filename: String,
+        username: String,
+        size: u64,
+        download_directory: String,
+        metadata: DownloadMetadata,
+        preview_bytes: Option<u64>,
     ) -> Result<(Download, Receiver<DownloadStatus>)> {
         info!("[client] Downloading {} from {}", filename, username);
 
@@ -130,6 +177,7 @@ impl Client {
             sender: download_sender,
             queue_position: None,
             metadata,
+            preview_bytes,
         };
 
         let mut context = self.context.write_safe()?;

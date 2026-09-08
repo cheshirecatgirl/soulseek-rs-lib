@@ -224,6 +224,12 @@ pub struct Download {
     pub sender: Sender<DownloadStatus>,
     pub queue_position: Option<u32>,
     pub metadata: DownloadMetadata,
+    /// Stop after this many bytes rather than taking the whole file.
+    ///
+    /// What a preview is: enough of the start to hear, then the connection
+    /// goes. Formats whose index sits at the end of the file — MP4 and its
+    /// relatives — cannot be cut this way, so the caller decides.
+    pub preview_bytes: Option<u64>,
 }
 
 impl Download {

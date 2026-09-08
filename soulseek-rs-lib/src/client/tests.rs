@@ -17,6 +17,7 @@ fn download(
         sender,
         queue_position: None,
         metadata: DownloadMetadata::default(),
+        preview_bytes: None,
     }
 }
 
