@@ -22,6 +22,18 @@ impl MessageHandler<PeerMessage> for PlaceInQueueRequest {
     }
 }
 
+/// Ask a peer where the file we queued sits in their upload queue.
+///
+/// Peers are not obliged to volunteer a place, and most only send one when
+/// asked, so a downloader that never asks shows an empty position forever.
+#[must_use]
+pub fn build_place_in_queue_request(filename: &str) -> Message {
+    Message::new()
+        .write_int32(51)
+        .write_string(filename)
+        .clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,5 +53,20 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_request_names_the_file_under_code_51() {
+        let expect: Vec<u8> = [
+            51, 0, 0, 0, // code
+            17, 0, 0, 0, 64, 64, 115, 104, 97, 114, 101, 92, 116, 114, 97, 99,
+            107, 46, 109, 112, 51, // "@@share\\track.mp3"
+        ]
+        .to_vec();
+
+        assert_eq!(
+            expect,
+            build_place_in_queue_request("@@share\\track.mp3").get_data()
+        );
     }
 }

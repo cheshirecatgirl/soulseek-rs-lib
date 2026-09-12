@@ -344,6 +344,48 @@ impl Client {
         Ok(())
     }
 
+    /// Ask a peer where a file we queued sits in their upload queue.
+    ///
+    /// The answer comes back as `PlaceInQueueResponse` and is recorded against
+    /// the download, so it is read with [`Client::get_all_downloads`] rather
+    /// than returned here. Asking matters: most clients only send a place when
+    /// asked for one.
+    ///
+    /// # Errors
+    /// Returns an error if the client's context lock is poisoned.
+    pub fn request_place_in_queue(
+        &self,
+        username: &str,
+        filename: &str,
+    ) -> Result<()> {
+        let request =
+            crate::message::peer::build_place_in_queue_request(filename);
+        let (connected, registry) = {
+            let ctx = self.context.read_safe()?;
+            (
+                ctx.peer_registry
+                    .as_ref()
+                    .is_some_and(|r| r.contains(username)),
+                ctx.peer_registry.clone(),
+            )
+        };
+        if connected {
+            if let Some(registry) = registry {
+                let _ = registry
+                    .send_to_peer(username, PeerMessage::SendMessage(request));
+            }
+        } else {
+            self.context
+                .write_safe()?
+                .queue_peer_message(username, request);
+            if let Some(handle) = &self.server_handle {
+                let _ = handle
+                    .send(ServerMessage::GetPeerAddress(username.to_string()));
+            }
+        }
+        Ok(())
+    }
+
     /// Remove and return what a peer said about itself, if it has answered.
     #[must_use]
     pub fn take_peer_info(
