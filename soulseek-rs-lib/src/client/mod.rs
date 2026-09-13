@@ -393,6 +393,11 @@ pub struct ClientContext {
     /// Everyone the server listed as privileged (code 69). They sort ahead of
     /// other peers in [`Self::upload_queue`].
     privileged_users: HashSet<String>,
+    /// People whose upload requests are not served.
+    ///
+    /// Not answered rather than refused: "ignored" is a statement about who is
+    /// worth dealing with, and a refusal is still a conversation.
+    ignored: HashSet<String>,
     /// Seconds of our own privileges left (code 92), once we have asked.
     own_privileges: Option<u32>,
     /// Peers waiting for one of our upload slots.
@@ -484,6 +489,7 @@ impl ClientContext {
             watched_users: HashSet::new(),
             wishlist_interval: None,
             privileged_users: HashSet::new(),
+            ignored: HashSet::new(),
             own_privileges: None,
             upload_queue: Vec::new(),
             upload_seq: 0,

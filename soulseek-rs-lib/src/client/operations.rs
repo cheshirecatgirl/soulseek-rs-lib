@@ -732,6 +732,13 @@ impl Client {
                         // The peer served next may not be this one.
                         match client_context.write_safe() {
                             Ok(mut ctx) => {
+                                if ctx.is_ignored(&requester_key) {
+                                    debug!(
+                                        "[client] ignoring a request from {}",
+                                        requester_key
+                                    );
+                                    continue;
+                                }
                                 let Some(file) = ctx.shares.get(&filename)
                                 else {
                                     debug!(

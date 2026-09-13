@@ -855,3 +855,22 @@ fn a_file_at_the_share_root_still_finds_its_attributes() {
 
     assert_eq!(listing.files[0].attribute(0), Some(320));
 }
+
+#[test]
+fn an_ignored_peer_is_dropped_from_the_queue_it_was_already_in() {
+    let client = Client::with_settings(ClientSettings::default());
+    {
+        let mut ctx = client.context.write().unwrap();
+        ctx.enqueue_upload("wanted", "a.flac", "/tmp/a.flac".into(), 1);
+        ctx.enqueue_upload("unwanted", "b.flac", "/tmp/b.flac".into(), 1);
+        assert_eq!(ctx.upload_queue.len(), 2);
+
+        // Ignoring someone has to reach what they already asked for, or it
+        // would only apply to requests they had not made yet.
+        ctx.set_ignored(vec!["unwanted".to_string()]);
+        assert_eq!(ctx.upload_queue.len(), 1);
+        assert_eq!(ctx.upload_queue[0].downloader, "wanted");
+        assert!(ctx.is_ignored("unwanted"));
+        assert!(!ctx.is_ignored("wanted"));
+    }
+}

@@ -58,6 +58,16 @@ impl Client {
         }
     }
 
+    /// Replace the set of people whose upload requests are not served.
+    ///
+    /// Not refused — ignored: a refusal is still a conversation. Anything of
+    /// theirs already in the queue goes with it.
+    pub fn set_ignored(&self, users: Vec<String>) {
+        if let Ok(mut ctx) = self.context.write_safe() {
+            ctx.set_ignored(users);
+        }
+    }
+
     /// Drop everything `username` was queued or offered, then hand their slot to
     /// whoever is next.
     pub(crate) fn release_upload_slots(

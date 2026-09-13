@@ -112,6 +112,21 @@ impl ClientContext {
         });
     }
 
+    /// Replace the set of people whose requests are not served.
+    pub fn set_ignored(&mut self, users: Vec<String>) {
+        self.ignored = users.into_iter().collect();
+        // Anything of theirs already waiting goes too, or ignoring someone
+        // would only take effect for requests they had not made yet.
+        self.upload_queue
+            .retain(|queued| !self.ignored.contains(&queued.downloader));
+    }
+
+    /// Whether this person's requests are being ignored.
+    #[must_use]
+    pub fn is_ignored(&self, username: &str) -> bool {
+        self.ignored.contains(username)
+    }
+
     /// Move as many queued uploads into free slots as will fit, and return the
     /// offers to send. Ordering is privileged-first, then first-come.
     ///
