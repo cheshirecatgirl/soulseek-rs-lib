@@ -34,6 +34,22 @@ impl Client {
         Ok(())
     }
 
+    /// Tell the server whether we are here.
+    ///
+    /// Status 2 is online and 1 is away; it is what other clients read to grey
+    /// a name out, and it is sent as 2 on sign-in. Nothing else about the
+    /// session changes — an away client still uploads.
+    ///
+    /// # Errors
+    /// Returns [`SoulseekRs::NotConnected`] when there is no session.
+    pub fn set_away(&self, away: bool) -> Result<()> {
+        self.send_server_message(
+            crate::message::server::MessageFactory::build_set_status_message(
+                if away { 1 } else { 2 },
+            ),
+        )
+    }
+
     /// Send a raw server message via the server actor, mapping a dead channel
     /// to [`SoulseekRs::NotConnected`].
     pub(super) fn send_server_message(

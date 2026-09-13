@@ -12,6 +12,7 @@ use crate::message::server::MessageFactory;
 use crate::trace;
 use crate::types::{Download, DownloadStatus};
 use crate::utils::path::{PART_SUFFIX, expand_tilde};
+use crate::utils::throttle::take_download_allowance;
 
 const READ_BUFFER_SIZE: usize = 64 * 1024;
 const WRITE_BUFFER_SIZE: usize = 512 * 1024;
@@ -401,7 +402,12 @@ impl DownloadPeer {
                 }
             }
 
-            match stream.read(&mut read_buffer) {
+            // Reading less than the buffer holds is what paces a download:
+            // the rest stays in the kernel's receive buffer and TCP tells the
+            // sender to slow down. A downloader cannot limit anything any
+            // other way, since it is not the one sending.
+            let allowance = take_download_allowance(read_buffer.len());
+            match stream.read(&mut read_buffer[..allowance]) {
                 Ok(0) => {
                     trace!(
                         "[download_peer:{}] connection closed by peer",
