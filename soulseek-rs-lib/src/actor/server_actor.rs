@@ -5,7 +5,6 @@ use crate::message::server::AdminMessageHandler;
 use crate::message::server::CheckPrivilegesHandler;
 use crate::message::server::ConnectToPeerHandler;
 use crate::message::server::ExcludedSearchPhrasesHandler;
-use crate::message::server::FileSearchHandler;
 use crate::message::server::GetPeerAddressHandler;
 use crate::message::server::JoinRoomHandler;
 use crate::message::server::LeaveRoomHandler;
@@ -21,6 +20,7 @@ use crate::message::server::UserJoinedRoomHandler;
 use crate::message::server::UserLeftRoomHandler;
 use crate::message::server::WatchUserHandler;
 use crate::message::server::WishListIntervalHandler;
+use crate::message::server::{EmbeddedMessageHandler, FileSearchHandler};
 use crate::message::server::{
     GetUserStatsHandler, GetUserStatusHandler, RoomListHandler,
 };
@@ -271,19 +271,30 @@ pub struct ServerActor {
     queued_messages: Vec<ServerMessage>,
     shared_folder_count: u32,
     shared_file_count: u32,
+    /// Our own name, which the distributed handshake has to state.
+    username: String,
     session: SessionWatch,
     last_ping: Option<Instant>,
 }
 
 /// The messages a client sends right after a successful login: its shared-file
-/// counts, distributed-network opt-out, online status, and (when listening) the
-/// port peers should connect to. Kept as a free function so it can be tested
-/// without a live connection.
+/// counts, its place in the distributed network, online status, and (when
+/// listening) the port peers should connect to. Kept as a free function so it
+/// can be tested without a live connection.
+///
+/// The distributed part is what makes our shares findable. Searches travel
+/// down a tree of clients, and a client the tree has never heard of answers
+/// nothing however much it is sharing. Saying "no parent, level zero, my own
+/// root" is what makes the server relay searches to us directly, which is the
+/// part of the network a client can take without also relaying to children.
+/// Children are refused for exactly that reason: accepting them without
+/// passing searches on would be a hole in the network for everyone below.
 fn post_login_messages(
     enable_listen: bool,
     listen_port: u16,
     shared_folders: u32,
     shared_files: u32,
+    username: &str,
 ) -> Vec<Message> {
     let mut messages = vec![
         MessageFactory::build_shared_folders_message(
@@ -291,6 +302,9 @@ fn post_login_messages(
             shared_files,
         ),
         MessageFactory::build_no_parent_message(),
+        MessageFactory::build_branch_level(0),
+        MessageFactory::build_branch_root(username),
+        MessageFactory::build_accept_children(false),
         MessageFactory::build_set_status_message(2),
     ];
     if enable_listen {
@@ -308,6 +322,7 @@ impl ServerActor {
         enable_listen: bool,
         shared_folder_count: u32,
         shared_file_count: u32,
+        username: String,
     ) -> Self {
         Self {
             address,
@@ -325,6 +340,7 @@ impl ServerActor {
             queued_messages: Vec::new(),
             shared_folder_count,
             shared_file_count,
+            username,
             session: SessionWatch::default(),
             last_ping: None,
         }
@@ -404,6 +420,7 @@ impl ServerActor {
         handlers.register_handler(ParentSpeedRatioHandler);
         handlers.register_handler(CheckPrivilegesHandler);
         handlers.register_handler(FileSearchHandler);
+        handlers.register_handler(EmbeddedMessageHandler);
         handlers.register_handler(GetPeerAddressHandler);
         handlers.register_handler(ConnectToPeerHandler);
 
@@ -640,6 +657,7 @@ impl ServerActor {
                 self.listen_port,
                 self.shared_folder_count,
                 self.shared_file_count,
+                &self.username,
             ) {
                 self.send_message(msg);
             }
@@ -1051,6 +1069,7 @@ mod tests {
             false,
             0,
             0,
+            "tester".to_string(),
         )
     }
 
@@ -1206,10 +1225,11 @@ mod tests {
 
     #[test]
     fn post_login_messages_carry_counts_and_conditional_wait_port() {
-        let messages = post_login_messages(true, 4321, 3, 7);
+        let messages = post_login_messages(true, 4321, 3, 7, "tester");
         let codes: Vec<u32> = messages.iter().map(code_of).collect();
-        // SharedFolders, HaveNoParent, SetStatus, SetWaitPort.
-        assert_eq!(codes, vec![35, 71, 28, 2]);
+        // SharedFolders, HaveNoParent, BranchLevel, BranchRoot,
+        // AcceptChildren, SetStatus, SetWaitPort.
+        assert_eq!(codes, vec![35, 71, 126, 127, 100, 28, 2]);
 
         // The SharedFolders message (code 35) carries the real counts.
         let shared = messages[0].get_data();
@@ -1217,8 +1237,8 @@ mod tests {
         assert_eq!(u32::from_le_bytes(shared[8..12].try_into().unwrap()), 7);
 
         // Not listening omits SetWaitPort (code 2).
-        let no_listen = post_login_messages(false, 4321, 3, 7);
+        let no_listen = post_login_messages(false, 4321, 3, 7, "tester");
         let codes: Vec<u32> = no_listen.iter().map(code_of).collect();
-        assert_eq!(codes, vec![35, 71, 28]);
+        assert_eq!(codes, vec![35, 71, 126, 127, 100, 28]);
     }
 }

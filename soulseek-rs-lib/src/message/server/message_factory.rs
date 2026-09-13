@@ -131,6 +131,33 @@ impl MessageFactory {
             .write_int32(status_code)
             .clone()
     }
+    /// `BranchLevel` (code 126): how far from the root of the distributed
+    /// tree we sit. Zero, because we are not somebody's child.
+    #[must_use]
+    pub fn build_branch_level(level: u32) -> Message {
+        Message::new().write_int32(126).write_int32(level).clone()
+    }
+
+    /// `BranchRoot` (code 127): whose branch we are on. Our own name, for the
+    /// same reason.
+    #[must_use]
+    pub fn build_branch_root(username: &str) -> Message {
+        Message::new()
+            .write_int32(127)
+            .write_string(username)
+            .clone()
+    }
+
+    /// `AcceptChildren` (code 100): whether other clients may attach to us.
+    ///
+    /// No. Taking children means relaying searches down a tree, and a client
+    /// that accepts them without doing that is a hole in the network for
+    /// everyone below it.
+    #[must_use]
+    pub fn build_accept_children(accept: bool) -> Message {
+        Message::new().write_int32(100).write_bool(accept).clone()
+    }
+
     #[must_use]
     pub fn build_no_parent_message() -> Message {
         Message::new().write_int32(71).write_bool(true).clone()
@@ -429,6 +456,25 @@ fn test_build_check_privileges() {
     assert_eq!(
         vec![92, 0, 0, 0],
         MessageFactory::build_check_privileges().get_data()
+    );
+}
+
+#[test]
+fn test_build_distributed_handshake() {
+    assert_eq!(
+        vec![126, 0, 0, 0, 0, 0, 0, 0],
+        MessageFactory::build_branch_level(0).get_data(),
+        "BranchLevel is code 126 and a level"
+    );
+    assert_eq!(
+        vec![127, 0, 0, 0, 6, 0, 0, 0, 116, 101, 115, 116, 101, 114],
+        MessageFactory::build_branch_root("tester").get_data(),
+        "BranchRoot is code 127 and a name"
+    );
+    assert_eq!(
+        vec![100, 0, 0, 0, 0],
+        MessageFactory::build_accept_children(false).get_data(),
+        "AcceptChildren is code 100 and one byte"
     );
 }
 

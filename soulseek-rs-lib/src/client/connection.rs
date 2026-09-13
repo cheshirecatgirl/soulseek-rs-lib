@@ -103,6 +103,7 @@ impl Client {
             self.enable_listen,
             shared_folder_count,
             shared_file_count,
+            self.username.clone(),
         );
         server_actor.set_session_watch(self.session.clone());
 
