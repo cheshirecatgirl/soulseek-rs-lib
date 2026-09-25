@@ -146,8 +146,21 @@ impl PartFile {
         // A `.part` at or beyond the advertised size is restarted. We do not
         // persist its username, full remote path, or prior expected size, so
         // equality alone cannot prove that its bytes belong to this transfer.
+        // How much of the file this transfer wants. A preview stops at its
+        // cap and the `.part` it leaves is a fragment, not a resume point for
+        // a later full download — which is why a capped transfer never
+        // continues from what is already there.
+        let expected = download
+            .preview_bytes
+            .map_or(download.size, |cap| cap.min(download.size));
+
         let on_disk = fs::metadata(&path).map_or(0, |m| m.len());
-        let written = if on_disk < download.size { on_disk } else { 0 };
+        let written = if download.preview_bytes.is_some() || on_disk >= expected
+        {
+            0
+        } else {
+            on_disk
+        };
 
         let file = if written > 0 {
             OpenOptions::new().append(true).open(&path)
@@ -160,7 +173,7 @@ impl PartFile {
             file,
             final_path,
             written,
-            expected: download.size,
+            expected,
         })
     }
 
@@ -628,6 +641,54 @@ mod tests {
         dir
     }
 
+    #[test]
+    fn a_preview_stops_at_its_cap_and_counts_as_complete() {
+        let dir = scratch_dir("preview");
+        let mut download = download_into(&dir, 1_000_000);
+        download.preview_bytes = Some(16);
+
+        let mut part = PartFile::open(&download).unwrap();
+        part.write(&[7u8; 64]).unwrap();
+
+        assert!(part.is_complete(), "the cap is the whole of a preview");
+        let path = part.finish().unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            16,
+            "no more than the cap is written"
+        );
+    }
+
+    #[test]
+    fn a_preview_never_resumes_from_a_fragment_left_behind() {
+        let dir = scratch_dir("preview-resume");
+        let mut download = download_into(&dir, 1_000_000);
+        download.preview_bytes = Some(32);
+
+        let mut first = PartFile::open(&download).unwrap();
+        first.write(&[1u8; 32]).unwrap();
+        let _ = first.finish();
+
+        // The same cap again, with a fragment still on disk: it starts over
+        // rather than counting 32 bytes as 32 bytes already had. A `.part`
+        // holding the first seconds of a track is not the first seconds of
+        // the download somebody actually wanted.
+        std::fs::write(dir.join("file.bin.part"), [1u8; 32]).unwrap();
+        let again = PartFile::open(&download).unwrap();
+        assert_eq!(again.written, 0);
+    }
+
+    #[test]
+    fn a_cap_larger_than_the_file_is_just_the_file() {
+        let dir = scratch_dir("preview-big");
+        let mut download = download_into(&dir, 10);
+        download.preview_bytes = Some(9_000);
+
+        let mut part = PartFile::open(&download).unwrap();
+        part.write(&[3u8; 10]).unwrap();
+        assert!(part.is_complete());
+    }
+
     fn download_into(dir: &std::path::Path, size: u64) -> Download {
         Download {
             username: "peer".to_string(),
@@ -639,6 +700,7 @@ mod tests {
             sender: mpsc::channel().0,
             queue_position: None,
             metadata: DownloadMetadata::default(),
+            preview_bytes: None,
         }
     }
 

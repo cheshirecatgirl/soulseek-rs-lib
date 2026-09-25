@@ -33,6 +33,8 @@ impl std::fmt::Display for PeerAddress {
 #[derive(Debug, Default)]
 pub struct Context {
     pub logged_in: Option<bool>,
+    /// Why the server refused the last login, when it said.
+    pub rejection: Option<(String, Option<String>)>,
 }
 
 impl Context {

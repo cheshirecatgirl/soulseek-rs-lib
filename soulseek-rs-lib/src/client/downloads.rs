@@ -109,6 +109,38 @@ impl Client {
         )
     }
 
+    /// Fetch only the start of a file, for listening before deciding.
+    ///
+    /// `bytes` is a cap, not a length: a file shorter than the cap simply
+    /// arrives whole. What comes down is a fragment and is never resumed into
+    /// a full copy later, because a `.part` holding the first few seconds of a
+    /// track is not the first few seconds of the download somebody actually
+    /// wanted.
+    ///
+    /// Not every format survives being cut. MP4 and its relatives keep their
+    /// index at the end of the file, so a truncated one will not play — which
+    /// the caller knows about and this does not, so the choice is left there.
+    ///
+    /// # Errors
+    /// The same as [`Self::download`].
+    pub fn preview(
+        &self,
+        filename: String,
+        username: String,
+        size: u64,
+        download_directory: String,
+        bytes: u64,
+    ) -> Result<(Download, Receiver<DownloadStatus>)> {
+        self.start_download(
+            filename,
+            username,
+            size,
+            download_directory,
+            DownloadMetadata::default(),
+            Some(bytes.max(1)),
+        )
+    }
+
     pub fn download_with_metadata(
         &self,
         filename: String,
@@ -116,6 +148,25 @@ impl Client {
         size: u64,
         download_directory: String,
         metadata: DownloadMetadata,
+    ) -> Result<(Download, Receiver<DownloadStatus>)> {
+        self.start_download(
+            filename,
+            username,
+            size,
+            download_directory,
+            metadata,
+            None,
+        )
+    }
+
+    fn start_download(
+        &self,
+        filename: String,
+        username: String,
+        size: u64,
+        download_directory: String,
+        metadata: DownloadMetadata,
+        preview_bytes: Option<u64>,
     ) -> Result<(Download, Receiver<DownloadStatus>)> {
         info!("[client] Downloading {} from {}", filename, username);
 
@@ -136,6 +187,7 @@ impl Client {
             sender: download_sender,
             queue_position: None,
             metadata,
+            preview_bytes,
         };
 
         let mut context = self.context.write_safe()?;

@@ -29,10 +29,13 @@ impl SharedFileEntry {
 }
 
 /// One shared directory and the files directly in it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SharedDirectory {
     pub name: String,
     pub files: Vec<SharedFileEntry>,
+    /// Shared only with the owner's friends. A listing may name such a folder
+    /// so you know it is there; asking for its files is refused.
+    pub locked: bool,
 }
 
 /// Receives a peer's `SharedFileListResponse` (peer code 5) when browsing them.
@@ -50,10 +53,12 @@ impl MessageHandler<PeerMessage> for SharedFileListResponseHandler {
 /// Build a `SharedFileListResponse` (peer code 5) from the directory listing.
 #[must_use]
 pub fn build_shared_file_list(dirs: &[SharedDirectory]) -> Message {
+    let (locked, open): (Vec<SharedDirectory>, Vec<SharedDirectory>) =
+        dirs.iter().cloned().partition(|dir| dir.locked);
     let mut payload = Message::new();
-    write_directories(&mut payload, dirs);
-    payload.write_int32(0); // unknown
-    payload.write_int32(0); // number of private directories
+    write_directories(&mut payload, &open);
+    payload.write_int32(0); // unknown; official clients always send 0
+    write_directories(&mut payload, &locked);
 
     let compressed = deflate(&payload.get_data());
     Message::new()
@@ -69,8 +74,17 @@ pub fn build_shared_file_list(dirs: &[SharedDirectory]) -> Message {
 #[must_use]
 pub fn parse_shared_file_list(message: &mut Message) -> Vec<SharedDirectory> {
     // A whole share listing is the one payload that legitimately runs large.
-    decompress_body(message, MAX_INFLATED_LISTING)
-        .map_or_else(Vec::new, |mut body| read_directories(&mut body))
+    let Some(mut body) = decompress_body(message, MAX_INFLATED_LISTING) else {
+        return Vec::new();
+    };
+    let mut dirs = read_directories(&mut body, false);
+    // Older clients stop after the open folders; the rest is an unknown
+    // integer and then the folders shared with friends only.
+    if body.get_pointer() + 8 <= body.get_size() {
+        body.read_int32();
+        dirs.extend(read_directories(&mut body, true));
+    }
+    dirs
 }
 
 /// Write a directory listing in the form both code 5 and code 37 carry.
@@ -97,7 +111,10 @@ pub fn write_directories(payload: &mut Message, dirs: &[SharedDirectory]) {
 /// Read back what [`write_directories`] wrote, stopping early when a hostile
 /// count outruns the payload so a bogus length cannot spin into a huge
 /// allocation loop.
-pub fn read_directories(body: &mut Message) -> Vec<SharedDirectory> {
+pub fn read_directories(
+    body: &mut Message,
+    locked: bool,
+) -> Vec<SharedDirectory> {
     let dir_count = body.read_int32();
     let mut dirs = Vec::new();
     for _ in 0..dir_count {
@@ -131,7 +148,11 @@ pub fn read_directories(body: &mut Message) -> Vec<SharedDirectory> {
                 attributes,
             });
         }
-        dirs.push(SharedDirectory { name, files });
+        dirs.push(SharedDirectory {
+            name,
+            files,
+            locked,
+        });
     }
     dirs
 }
@@ -163,6 +184,7 @@ fn hostile_dir_count_does_not_hang() {
 #[test]
 fn a_listing_carries_each_files_attributes() {
     let dirs = vec![SharedDirectory {
+        locked: false,
         name: "music\\album".to_string(),
         files: vec![
             SharedFileEntry {
@@ -189,6 +211,7 @@ fn a_listing_carries_each_files_attributes() {
 fn shared_file_list_roundtrips() {
     let dirs = vec![
         SharedDirectory {
+            locked: false,
             name: "music\\album".to_string(),
             files: vec![
                 SharedFileEntry {
@@ -204,6 +227,7 @@ fn shared_file_list_roundtrips() {
             ],
         },
         SharedDirectory {
+            locked: false,
             name: "music".to_string(),
             files: vec![SharedFileEntry {
                 name: "top.mp3".to_string(),
@@ -218,4 +242,49 @@ fn shared_file_list_roundtrips() {
     let mut decoded = Message::new_with_data(message.get_buffer());
     decoded.set_pointer(8);
     assert_eq!(parse_shared_file_list(&mut decoded), dirs);
+}
+
+#[test]
+fn friends_only_folders_travel_in_the_private_section() {
+    let open = SharedDirectory {
+        name: "music".to_string(),
+        files: vec![SharedFileEntry {
+            name: "a.mp3".to_string(),
+            size: 1,
+            attributes: Vec::new(),
+        }],
+        locked: false,
+    };
+    let locked = SharedDirectory {
+        name: "music\\mixes".to_string(),
+        files: vec![SharedFileEntry {
+            name: "b.mp3".to_string(),
+            size: 2,
+            attributes: Vec::new(),
+        }],
+        locked: true,
+    };
+    // Given locked first, so the order on the wire is the builder's doing.
+    let message = build_shared_file_list(&[locked.clone(), open.clone()]);
+    let mut decoded = Message::new_with_data(message.get_buffer());
+    decoded.set_pointer(8);
+    assert_eq!(parse_shared_file_list(&mut decoded), vec![open, locked]);
+}
+
+#[test]
+fn a_listing_without_a_private_section_still_parses() {
+    let mut payload = Message::new();
+    write_directories(
+        &mut payload,
+        &[SharedDirectory {
+            name: "old".to_string(),
+            ..SharedDirectory::default()
+        }],
+    );
+    let mut message = crate::message::framed(|m| {
+        m.write_raw_bytes(deflate(&payload.get_data()));
+    });
+    let dirs = parse_shared_file_list(&mut message);
+    assert_eq!(dirs.len(), 1);
+    assert!(!dirs[0].locked);
 }

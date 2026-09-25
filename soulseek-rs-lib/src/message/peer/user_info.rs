@@ -23,13 +23,29 @@ pub fn build_user_info_request() -> Message {
 }
 
 /// What a peer says about itself, from its `UserInfoResponse` (code 16).
+/// The largest profile picture worth holding in memory.
+///
+/// Four megabytes is far past any reasonable avatar and far short of what a
+/// peer could send if it wanted to cost us something.
+pub const MAX_PICTURE: usize = 4 * 1024 * 1024;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PeerInfo {
     pub description: String,
-    /// Whether a profile picture came with it, and how many bytes it was. The
-    /// image itself is not kept: no caller has a use for it yet, and a peer
-    /// can make it arbitrarily large.
+    /// Whether a profile picture came with it, and how many bytes it was.
+    ///
+    /// Kept even when the bytes are not, so a caller can tell "no picture"
+    /// from "a picture too big to hold".
     pub picture_bytes: Option<usize>,
+    /// The picture itself, when it is small enough to keep.
+    ///
+    /// A profile picture is the one part of a peer's answer that a person
+    /// actually looks at, so it is worth carrying — but a peer chooses how
+    /// big it is, and nothing obliges them to be reasonable. Anything past
+    /// [`MAX_PICTURE`] is counted and dropped rather than held: the size still
+    /// arrives, so a caller can say a picture was refused rather than say
+    /// there was none.
+    pub picture: Option<Vec<u8>>,
     /// Uploads the peer says it has done in total.
     pub total_uploads: u32,
     /// How many transfers are waiting in its queue.
@@ -50,13 +66,18 @@ impl MessageHandler<PeerMessage> for UserInfoResponseHandler {
     fn handle(&self, message: &mut Message, sender: Sender<PeerMessage>) {
         let description = message.read_string();
         let has_picture = message.read_bool();
+        let mut picture = None;
         let picture_bytes = has_picture.then(|| {
             let length = message.read_int32() as usize;
             let available =
                 message.get_size().saturating_sub(message.get_pointer());
             let length = length.min(available);
-            let at = message.get_pointer() + length;
-            message.set_pointer(at);
+            let at = message.get_pointer();
+            // `get_slice` takes absolute bounds, not an offset and a count.
+            if length <= MAX_PICTURE {
+                picture = Some(message.get_slice(at, at + length));
+            }
+            message.set_pointer(at + length);
             length
         });
         let total_uploads = message.read_int32();
@@ -72,6 +93,7 @@ impl MessageHandler<PeerMessage> for UserInfoResponseHandler {
         let _ = sender.send(PeerMessage::UserInfoReceived(PeerInfo {
             description,
             picture_bytes,
+            picture,
             total_uploads,
             queue_size,
             slots_free,
@@ -80,20 +102,39 @@ impl MessageHandler<PeerMessage> for UserInfoResponseHandler {
     }
 }
 
-/// Build a `UserInfoResponse` (peer code 16) with no description or picture.
+/// Build a `UserInfoResponse` (peer code 16): who we are, and how busy.
+///
+/// The picture is a length and the bytes, present only when the flag before
+/// it says so — the same layout [`UserInfoResponseHandler`] reads.
 #[must_use]
 pub fn build_user_info(
+    description: &str,
+    picture: Option<&[u8]>,
     upload_slots: u32,
     queue_size: u32,
     slots_free: bool,
 ) -> Message {
-    Message::new()
-        .write_int32(16)
-        .write_string("")
-        .write_bool(false)
+    let mut message = Message::new();
+    message.write_int32(16).write_string(description);
+    match picture {
+        Some(bytes) => {
+            let length = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+            message
+                .write_bool(true)
+                .write_int32(length)
+                .write_raw_bytes(bytes.to_vec());
+        }
+        None => {
+            message.write_bool(false);
+        }
+    }
+    message
         .write_int32(upload_slots)
         .write_int32(queue_size)
         .write_bool(slots_free)
+        // Who may send us files unasked: no one, since nothing here accepts
+        // a file we did not queue.
+        .write_int32(0)
         .clone()
 }
 
@@ -132,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn a_picture_is_skipped_over_rather_than_kept() {
+    fn a_picture_is_kept_and_the_fields_after_it_still_line_up() {
         let info = parse(|m| {
             m.write_string("with a picture");
             m.write_bool(true);
@@ -145,7 +186,64 @@ mod tests {
         });
 
         assert_eq!(info.picture_bytes, Some(4));
+        assert_eq!(info.picture.as_deref(), Some(&[1u8, 2, 3, 4][..]));
         assert_eq!(info.total_uploads, 7, "the fields after it still line up");
+    }
+
+    #[test]
+    fn a_picture_past_the_cap_is_counted_and_dropped() {
+        // The size still arrives, so a caller can say a picture was refused
+        // rather than say there was none.
+        let huge = vec![7u8; MAX_PICTURE + 1];
+        let info = parse(|m| {
+            m.write_string("enormous");
+            m.write_bool(true);
+            m.write_int32(u32::try_from(huge.len()).unwrap());
+            m.write_raw_bytes(huge.clone());
+            m.write_int32(3);
+            m.write_int32(0);
+            m.write_bool(false);
+        });
+
+        assert_eq!(info.picture_bytes, Some(MAX_PICTURE + 1));
+        assert_eq!(info.picture, None, "too big to hold");
+        assert_eq!(info.total_uploads, 3, "and it was still stepped over");
+    }
+
+    /// What we send, read back by what reads a peer's: the two have to agree
+    /// on where the picture ends, or every field after it is wrong.
+    fn ours(description: &str, picture: Option<&[u8]>) -> PeerInfo {
+        let built = build_user_info(description, picture, 4, 2, true);
+        // The code is ours to write and the handler's caller's to strip.
+        let body = built.get_data()[4..].to_vec();
+        parse(|m| {
+            m.write_raw_bytes(body);
+        })
+    }
+
+    #[test]
+    fn our_own_answer_carries_the_profile_we_set() {
+        let info = ours("flac, mostly", Some(&[0x89, b'P', b'N', b'G']));
+        assert_eq!(info.description, "flac, mostly");
+        assert_eq!(
+            info.picture.as_deref(),
+            Some(&[0x89, b'P', b'N', b'G'][..])
+        );
+        assert_eq!(
+            info.total_uploads, 4,
+            "the fields after the picture still line up"
+        );
+        assert_eq!(info.queue_size, 2);
+        assert!(info.slots_free);
+        assert_eq!(info.upload_allowed, Some(0), "nobody may push files to us");
+    }
+
+    #[test]
+    fn our_own_answer_without_a_picture_says_so() {
+        let info = ours("", None);
+        assert_eq!(info.description, "");
+        assert_eq!(info.picture_bytes, None);
+        assert_eq!(info.total_uploads, 4);
     }
 
     #[test]
@@ -176,6 +274,11 @@ mod tests {
         });
 
         assert_eq!(info.picture_bytes, Some(2));
+        assert_eq!(
+            info.picture.as_deref(),
+            Some(&[9u8, 9][..]),
+            "what is really there is kept; the length it claimed is not"
+        );
         assert_eq!(info.total_uploads, 0, "nothing left to read reads as zero");
     }
 }

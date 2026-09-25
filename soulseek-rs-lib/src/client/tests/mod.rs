@@ -27,6 +27,7 @@ fn download(
         sender,
         queue_position: None,
         metadata: DownloadMetadata::default(),
+        preview_bytes: None,
     }
 }
 
@@ -39,10 +40,12 @@ fn peer_files(count: usize) -> SearchResult {
                 name: format!("song-{i}.mp3"),
                 size: 1,
                 attribs: std::collections::HashMap::new(),
+                locked: false,
             })
             .collect(),
         slots: 1,
         speed: 0,
+        queue_length: 0,
         username: "bob".to_string(),
     }
 }

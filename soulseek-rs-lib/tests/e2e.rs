@@ -125,6 +125,7 @@ impl TestServer {
 
     fn settings(&self, username: &str, password: &str) -> ClientSettings {
         ClientSettings {
+            friends_only_directories: Vec::new(),
             username: username.to_string(),
             password: password.to_string(),
             server_address: PeerAddress::new(self.host.clone(), self.port),
@@ -4583,6 +4584,7 @@ fn phrases_the_server_excludes_are_kept_for_our_replies() {
     let (host, port) = addr.rsplit_once(':').expect("stub addr");
 
     let mut client = Client::with_settings(ClientSettings {
+        friends_only_directories: Vec::new(),
         username: "e2e_excluded".to_string(),
         password: "pw".to_string(),
         server_address: PeerAddress::new(
@@ -5602,6 +5604,7 @@ fn a_dropped_client_has_released_its_listener_port_when_drop_returns() {
 
     for round in 0..25 {
         let mut client = Client::with_settings(ClientSettings {
+            friends_only_directories: Vec::new(),
             username: "e2e_port_release_now".to_string(),
             password: "pw".to_string(),
             server_address: PeerAddress::new("127.0.0.1".to_string(), 1),
@@ -5629,6 +5632,7 @@ fn a_cancelled_client_never_binds_its_port() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let port = free_port().expect("a port to hold");
     let mut client = Client::with_settings(ClientSettings {
+        friends_only_directories: Vec::new(),
         username: "e2e_cancelled_bind".to_string(),
         password: "pw".to_string(),
         server_address: PeerAddress::new("127.0.0.1".to_string(), 1),
@@ -5651,6 +5655,7 @@ fn a_cancel_ends_a_login_waiting_for_its_verdict_and_nothing_follows_it() {
     let server =
         std::net::TcpListener::bind("127.0.0.1:0").expect("a silent server");
     let mut client = Client::with_settings(ClientSettings {
+        friends_only_directories: Vec::new(),
         username: "e2e_cancelled_login".to_string(),
         password: "pw".to_string(),
         server_address: PeerAddress::new(

@@ -65,6 +65,9 @@ impl Client {
                 return;
             }
             let response = match client_context.read_safe() {
+                // Nor anyone whose requests we ignore: a reply would only
+                // invite them to ask for a file.
+                Ok(ctx) if ctx.is_ignored(&username) => return,
                 Ok(ctx) => build_search_response(
                     &ctx.shares,
                     &own_username,
@@ -74,6 +77,7 @@ impl Client {
                     ctx.last_upload_speed,
                     ctx.upload_queue.len() as u32,
                     &ctx.excluded_search_phrases,
+                    ctx.is_friend(&username),
                 ),
                 Err(e) => {
                     error!("[client] IncomingSearch read: {}", e);

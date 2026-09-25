@@ -182,6 +182,23 @@ impl Client {
         self.send_to_peer_or_queue(username, request)
     }
 
+    /// Remove and return what a peer said about itself, if it has answered.
+    ///
+    /// Taking rather than reading, for a host that drains answers on a tick:
+    /// the reply is delivered once, and a peer that never answers simply
+    /// never appears. Reading it would hand the same answer back on every
+    /// pass, and there is no other way to tell a fresh reply from an old one.
+    #[must_use]
+    pub fn take_peer_info(
+        &self,
+        username: &str,
+    ) -> Option<crate::message::peer::PeerInfo> {
+        self.context
+            .write_safe()
+            .ok()
+            .and_then(|mut ctx| ctx.peer_info_taken(username))
+    }
+
     /// What `username` last said about itself.
     #[must_use]
     pub fn peer_info(
@@ -519,6 +536,16 @@ impl Client {
     ///
     /// # Errors
     /// [`crate::SoulseekRs::NotConnected`] when there is no server connection.
+    /// The last password the server confirmed, which is how a caller knows a
+    /// [`Client::change_password`] took.
+    #[must_use]
+    pub fn confirmed_password(&self) -> Option<String> {
+        self.context
+            .read_safe()
+            .ok()
+            .and_then(|ctx| ctx.confirmed_password.clone())
+    }
+
     pub fn change_password(&self, password: &str) -> Result<()> {
         self.send_server_message(MessageFactory::build_change_password(
             password,

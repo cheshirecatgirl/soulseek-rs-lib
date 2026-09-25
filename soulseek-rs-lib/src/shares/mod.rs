@@ -29,6 +29,10 @@ pub struct SharedFile {
     /// `(code, value)` audio attributes read from the file's headers: bitrate,
     /// duration, VBR, sample rate, bit depth, as far as the format gives them.
     pub attributes: Vec<(u32, u32)>,
+    /// Under a root shared with friends only. Nobody else is told it exists,
+    /// and a request for it from anyone else is answered as for a file not
+    /// shared at all.
+    pub friends_only: bool,
 }
 
 /// A read-only snapshot of the shared files, cheap to clone behind an `Arc`.
@@ -64,11 +68,20 @@ impl Shares {
     /// their virtual paths cannot collide.
     #[must_use]
     pub fn scan_many(roots: &[PathBuf]) -> Self {
+        let marked: Vec<(PathBuf, bool)> =
+            roots.iter().map(|root| (root.clone(), false)).collect();
+        Self::scan_marked(&marked)
+    }
+
+    /// [`Shares::scan_many`], with each root saying whether it is shared with
+    /// friends only.
+    #[must_use]
+    pub fn scan_marked(roots: &[(PathBuf, bool)]) -> Self {
         let mut files = Vec::new();
         let mut folder_count = 0;
         let mut name_uses: HashMap<String, u32> = HashMap::new();
 
-        for root in roots {
+        for (root, friends_only) in roots {
             if std::fs::read_dir(root).is_err() {
                 crate::warn!(
                     "Skipping unreadable shared directory {}",
@@ -84,7 +97,11 @@ impl Shares {
             } else {
                 format!("{base} ({uses})")
             };
+            let first = files.len();
             scan_root(root, &name, &mut files, &mut folder_count);
+            for file in &mut files[first..] {
+                file.friends_only = *friends_only;
+            }
         }
 
         Self::from_files(files, folder_count)
@@ -127,6 +144,59 @@ impl Shares {
         self.by_virtual.get(virtual_path).map(|&i| &self.files[i])
     }
 
+    /// [`Shares::get`], as someone who is or is not a friend may have it.
+    #[must_use]
+    pub fn get_for(
+        &self,
+        virtual_path: &str,
+        friend: bool,
+    ) -> Option<&SharedFile> {
+        self.get(virtual_path).filter(|f| friend || !f.friends_only)
+    }
+
+    /// [`Shares::search`], as someone who is or is not a friend may see it.
+    #[must_use]
+    pub fn search_for(&self, query: &str, friend: bool) -> Vec<&SharedFile> {
+        let mut found = self.search(query);
+        if !friend {
+            found.retain(|f| !f.friends_only);
+        }
+        found
+    }
+
+    /// The listing a peer is sent when it browses us: everything for a
+    /// friend, and for anyone else only what is not kept for friends.
+    ///
+    /// A friend is sent friends-only folders as open ones, because to them
+    /// they are: marking them would tell their client they cannot have them.
+    #[must_use]
+    pub fn directories_for(&self, friend: bool) -> Vec<SharedDirectory> {
+        self.directories()
+            .into_iter()
+            .filter(|dir| friend || !dir.locked)
+            .map(|dir| SharedDirectory {
+                locked: false,
+                ..dir
+            })
+            .collect()
+    }
+
+    /// `(folders, files)` that anyone may have, which is what the server is
+    /// told we share.
+    #[must_use]
+    pub fn open_counts(&self) -> (u32, u32) {
+        let open: Vec<&SharedFile> =
+            self.files.iter().filter(|f| !f.friends_only).collect();
+        let folders: HashSet<&str> = open
+            .iter()
+            .map(|f| f.virtual_path.rsplit_once('\\').map_or("", |(d, _)| d))
+            .collect();
+        (
+            u32::try_from(folders.len()).unwrap_or(u32::MAX),
+            u32::try_from(open.len()).unwrap_or(u32::MAX),
+        )
+    }
+
     /// All shared files, in scan order.
     #[must_use]
     pub fn files(&self) -> &[SharedFile] {
@@ -134,13 +204,15 @@ impl Shares {
     }
 
     /// Files grouped by their virtual directory (everything before the final
-    /// backslash), in the form a browse or folder listing carries.
+    /// backslash), in the form a browse or folder listing carries. A folder
+    /// under a friends-only root comes back `locked`.
     #[must_use]
     pub fn directories(&self) -> Vec<SharedDirectory> {
         let mut by_dir: std::collections::BTreeMap<
             String,
             Vec<SharedFileEntry>,
         > = std::collections::BTreeMap::new();
+        let mut locked: HashSet<String> = HashSet::new();
         for file in &self.files {
             let (dir, base) = file
                 .virtual_path
@@ -153,6 +225,9 @@ impl Shares {
             };
             // Looked up before inserting: `entry()` would allocate the key
             // for every file, and a folder holds many.
+            if file.friends_only && !locked.contains(dir) {
+                locked.insert(dir.to_string());
+            }
             if let Some(files) = by_dir.get_mut(dir) {
                 files.push(entry);
             } else {
@@ -161,7 +236,11 @@ impl Shares {
         }
         by_dir
             .into_iter()
-            .map(|(name, files)| SharedDirectory { name, files })
+            .map(|(name, files)| SharedDirectory {
+                locked: locked.contains(&name),
+                name,
+                files,
+            })
             .collect()
     }
 
@@ -176,7 +255,8 @@ impl Shares {
     }
 }
 
-fn root_display_name(root: &Path) -> String {
+#[must_use]
+pub fn root_display_name(root: &Path) -> String {
     root.file_name().map_or_else(
         || "shared".to_string(),
         |n| n.to_string_lossy().into_owned(),
@@ -225,6 +305,7 @@ fn scan_root(
                     attributes: audio::probe(&path),
                     real_path: path,
                     size: meta.len(),
+                    friends_only: false,
                 });
                 folders_with_files.insert(dir.clone());
             }
@@ -235,7 +316,8 @@ fn scan_root(
 
 /// Build the peer-facing virtual path for `path` under `root`: the root's own
 /// name followed by the backslash-separated components relative to it.
-fn virtual_path_for(root_name: &str, root: &Path, path: &Path) -> String {
+#[must_use]
+pub fn virtual_path_for(root_name: &str, root: &Path, path: &Path) -> String {
     let rel = path.strip_prefix(root).unwrap_or(path);
     let mut parts = vec![root_name.to_string()];
     for component in rel.components() {
@@ -373,6 +455,43 @@ mod tests {
         assert!(shares.get(&format!("{name_b}\\top.mp3")).is_some());
         let _ = std::fs::remove_dir_all(root_a);
         let _ = std::fs::remove_dir_all(root_b);
+    }
+
+    #[test]
+    fn a_friends_only_root_is_seen_by_friends_alone() {
+        let open = temp_tree();
+        let mine = temp_tree();
+        let shares =
+            Shares::scan_marked(&[(open.clone(), false), (mine.clone(), true)]);
+        let mine_name = mine.file_name().unwrap().to_string_lossy();
+        let kept = format!("{mine_name}\\top.mp3");
+
+        assert!(shares.get_for(&kept, true).is_some());
+        assert!(shares.get_for(&kept, false).is_none());
+        assert_eq!(shares.search_for("top", true).len(), 2);
+        assert_eq!(shares.search_for("top", false).len(), 1);
+
+        let everyone = shares.directories_for(false);
+        assert!(
+            everyone
+                .iter()
+                .all(|dir| !dir.name.starts_with(&*mine_name))
+        );
+        let friend = shares.directories_for(true);
+        assert!(friend.iter().any(|dir| dir.name.starts_with(&*mine_name)));
+        assert!(
+            friend.iter().all(|dir| !dir.locked),
+            "a friend is sent them as open folders"
+        );
+        assert!(
+            shares.directories().iter().any(|dir| dir.locked),
+            "our own view still says which are kept for friends"
+        );
+
+        // The server hears about the open root only.
+        assert_eq!(shares.open_counts(), (2, 3));
+        let _ = std::fs::remove_dir_all(open);
+        let _ = std::fs::remove_dir_all(mine);
     }
 
     #[test]

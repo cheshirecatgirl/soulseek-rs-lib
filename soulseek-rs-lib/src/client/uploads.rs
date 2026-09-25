@@ -54,9 +54,91 @@ impl Client {
 
     /// How many uploads run at once. Lowering it does not interrupt transfers
     /// already in flight; the queue simply refills more slowly.
+    /// Set what a peer is told when it asks who we are.
+    ///
+    /// Every other client shows this as a person's profile: the text they
+    /// wrote and the picture they chose. Answering with nothing, which is
+    /// all this library could do, made everyone using it a blank page.
+    ///
+    /// # Errors
+    ///
+    /// A picture larger than [`MAX_PICTURE`](crate::message::peer::MAX_PICTURE)
+    /// is refused rather than sent: it is the size past which this library
+    /// drops a peer's own picture unread, and a client reading ours is owed
+    /// the same courtesy.
+    pub fn set_profile(
+        &self,
+        text: &str,
+        picture: Option<Vec<u8>>,
+    ) -> crate::error::Result<()> {
+        if picture.as_ref().is_some_and(|bytes| {
+            bytes.len() > crate::message::peer::MAX_PICTURE
+        }) {
+            return Err(crate::error::SoulseekRs::InvalidMessage(format!(
+                "a profile picture can be at most {} bytes",
+                crate::message::peer::MAX_PICTURE
+            )));
+        }
+        if let Ok(mut ctx) = self.context.write_safe() {
+            text.clone_into(&mut ctx.profile_text);
+            ctx.profile_picture = picture;
+        }
+        Ok(())
+    }
+
     pub fn set_upload_slots(&self, slots: usize) {
         if let Ok(mut ctx) = self.context.write_safe() {
             ctx.upload_slots = slots.max(1);
+        }
+    }
+
+    /// Replace the set of people whose upload requests are not served.
+    ///
+    /// Not refused — ignored: a refusal is still a conversation. Anything of
+    /// theirs already in the queue goes with it, or ignoring somebody would
+    /// only apply to requests they had not made yet.
+    pub fn set_ignored(&self, users: Vec<String>) {
+        if let Ok(mut ctx) = self.context.write_safe() {
+            ctx.set_ignored(users);
+        }
+    }
+
+    /// Replace the set of people counted as friends. They are sent what is
+    /// shared with friends only, and are not held to the queue limits.
+    pub fn set_friends(&self, users: Vec<String>) {
+        if let Ok(mut ctx) = self.context.write_safe() {
+            ctx.set_friends(users);
+        }
+    }
+
+    /// How much one person may have waiting in our queue. A request past
+    /// either limit is refused with the protocol's "Too many files" or "Too
+    /// many megabytes", which their client shows them.
+    pub fn set_queue_limits(
+        &self,
+        limits: crate::client::upload_rules::QueueLimits,
+    ) {
+        if let Ok(mut ctx) = self.context.write_safe() {
+            ctx.set_queue_limits(limits);
+        }
+    }
+
+    /// Say we are closing: everyone waiting in the queue is told "Pending
+    /// shutdown." and every later request is refused the same way. Call it
+    /// before [`Client::disconnect`], while the peers can still be reached,
+    /// so their clients stop waiting on a queue that is gone.
+    pub fn announce_shutdown(&self) {
+        let waiting = match self.context.write_safe() {
+            Ok(mut ctx) => ctx.begin_shutdown(),
+            Err(_) => return,
+        };
+        for (downloader, filename) in waiting {
+            Self::deny_upload(
+                &self.context,
+                &downloader,
+                &filename,
+                crate::client::upload_rules::PENDING_SHUTDOWN,
+            );
         }
     }
 
@@ -189,6 +271,7 @@ impl Client {
         client_context: Arc<RwLock<ClientContext>>,
         username: &str,
         filename: Option<&str>,
+        reason: Option<&str>,
     ) {
         let failed_tokens = match client_context.read_safe() {
             Ok(context) => {
@@ -210,7 +293,11 @@ impl Client {
                     context.downloads.update_status(
                         token,
                         DownloadStatus::Failed(Some(
-                            "The upload failed on the other side".to_string(),
+                            reason
+                                .unwrap_or(
+                                    "The upload failed on the other side",
+                                )
+                                .to_string(),
                         )),
                     );
                     context.downloads.remove(token);

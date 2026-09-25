@@ -10,6 +10,8 @@ use super::{
     DownloadPeer, DownloadStatus, MessageFactory, PeerMessage, RwLock,
     RwLockExt, ServerMessage, debug, error, info, thread, trace,
 };
+use crate::client::upload_rules::Verdict;
+use crate::message::peer::build_upload_denied;
 
 impl Client {
     pub(super) fn on_transfers(
@@ -78,6 +80,28 @@ impl Client {
                     }
                 });
             }
+            ClientOperation::UpdateDownloadTokens(transfer, username)
+                if transfer.direction == DIRECTION_DOWNLOAD =>
+            {
+                // The old way to ask for a file, from before QueueUpload:
+                // the asker wants to download from us. It is answered the
+                // way Nicotine+ answers it, as a queue request, and told
+                // "Queued" when it was taken.
+                let reason = Self::take_queue_request(
+                    client_context,
+                    &username,
+                    &transfer.filename,
+                )
+                .unwrap_or("Queued");
+                Self::answer_transfer(
+                    client_context,
+                    &username,
+                    MessageFactory::build_transfer_denial_message(
+                        transfer.token,
+                        reason,
+                    ),
+                );
+            }
             ClientOperation::UpdateDownloadTokens(transfer, username) => {
                 let mut context = match client_context.write_safe() {
                     Ok(c) => c,
@@ -98,8 +122,11 @@ impl Client {
                         }
                     });
 
+                // A file we never asked for, or asked for and gave up on,
+                // is refused. Saying yes would invite a file connection
+                // carrying a token nothing here is waiting for.
                 let cancelled =
-                    download_to_update.as_ref().is_some_and(|(_, d)| {
+                    download_to_update.as_ref().is_none_or(|(_, d)| {
                         matches!(d.status, DownloadStatus::Cancelled)
                     });
                 if !cancelled
@@ -186,34 +213,93 @@ impl Client {
                 requester_key,
                 filename,
             } => {
-                // The peer served next may not be this one.
-                match client_context.write_safe() {
-                    Ok(mut ctx) => {
-                        let Some(file) = ctx.shares.get(&filename) else {
-                            debug!(
-                                "[client] QueueUpload for unknown file {}",
-                                filename
-                            );
-                            return;
-                        };
-                        let size = file.size;
-                        let real_path = file.real_path.clone();
-                        ctx.enqueue_upload(
-                            &requester_key,
-                            &filename,
-                            real_path,
-                            size,
-                        );
-                    }
-                    Err(e) => {
-                        error!("[client] QueueUpload write: {}", e);
-                        return;
-                    }
+                if let Some(reason) = Self::take_queue_request(
+                    client_context,
+                    &requester_key,
+                    &filename,
+                ) {
+                    Self::deny_upload(
+                        client_context,
+                        &requester_key,
+                        &filename,
+                        reason,
+                    );
                 }
-                Self::pump_upload_queue(client_context);
             }
             // The dispatch loop routes only the variants above to here.
             _ => {}
         }
     }
+
+    /// Queue `filename` for `requester` if the rules allow it, and pump.
+    /// Returns the refusal to send when they do not; a request for
+    /// something already waiting is neither, and changes nothing.
+    fn take_queue_request(
+        client_context: &Arc<RwLock<ClientContext>>,
+        requester: &str,
+        filename: &str,
+    ) -> Option<&'static str> {
+        match client_context.write_safe() {
+            Ok(mut ctx) => {
+                if ctx.is_ignored(requester) {
+                    debug!("[client] ignoring a request from {}", requester);
+                    return None;
+                }
+                match ctx.judge_queue_request(requester, filename) {
+                    Verdict::Queue { real_path, size } => {
+                        ctx.enqueue_upload(
+                            requester, filename, real_path, size,
+                        );
+                    }
+                    Verdict::AlreadyWaiting => return None,
+                    Verdict::Deny(reason) => {
+                        debug!(
+                            "[client] refusing {} to {}: {}",
+                            filename, requester, reason
+                        );
+                        return Some(reason);
+                    }
+                }
+            }
+            Err(e) => {
+                error!("[client] QueueUpload write: {}", e);
+                return None;
+            }
+        }
+        // The peer served next may not be this one.
+        Self::pump_upload_queue(client_context);
+        None
+    }
+
+    /// Tell `requester` we will not send `filename`, and why.
+    pub(in crate::client) fn deny_upload(
+        client_context: &Arc<RwLock<ClientContext>>,
+        requester: &str,
+        filename: &str,
+        reason: &str,
+    ) {
+        Self::answer_transfer(
+            client_context,
+            requester,
+            build_upload_denied(filename, reason),
+        );
+    }
+
+    fn answer_transfer(
+        client_context: &Arc<RwLock<ClientContext>>,
+        username: &str,
+        message: crate::message::Message,
+    ) {
+        let registry = match client_context.read_safe() {
+            Ok(ctx) => ctx.peer_registry.clone(),
+            Err(_) => return,
+        };
+        if let Some(registry) = registry {
+            let _ = registry
+                .send_to_peer(username, PeerMessage::SendMessage(message));
+        }
+    }
 }
+
+/// A transfer request's direction when the asker wants a file from us.
+const DIRECTION_DOWNLOAD: u32 = 0;

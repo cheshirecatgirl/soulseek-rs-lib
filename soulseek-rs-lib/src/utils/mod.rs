@@ -6,6 +6,7 @@ pub mod md5;
 pub mod path;
 pub(crate) mod rate_limit;
 pub(crate) mod semaphore;
+pub mod throttle;
 pub mod zlib;
 
 // Re-export commonly used items

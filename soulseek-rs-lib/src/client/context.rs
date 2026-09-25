@@ -45,6 +45,7 @@ impl ClientContext {
             download_speed_limit: Arc::default(),
             shares: Arc::new(Shares::empty()),
             shared_directories: Vec::new(),
+            friends_only_directories: Vec::new(),
             peer_addresses: HashMap::new(),
             pending_peer_messages: HashMap::new(),
             uploads: HashMap::new(),
@@ -72,11 +73,18 @@ impl ClientContext {
             watched_users: HashSet::new(),
             wishlist_interval: None,
             privileged_users: HashSet::new(),
+            ignored: HashSet::new(),
+            friends: HashSet::new(),
+            queue_limits: super::upload_rules::QueueLimits::default(),
+            shutting_down: false,
             own_privileges: None,
+            confirmed_password: None,
             excluded_search_phrases: Vec::new(),
             upload_queue: Vec::new(),
             upload_seq: 0,
             upload_slots: DEFAULT_UPLOAD_SLOTS,
+            profile_text: String::new(),
+            profile_picture: None,
             last_upload_speed: 0,
             upload_events: Vec::new(),
             downloads: DownloadStore::new(),
@@ -306,6 +314,18 @@ impl ClientContext {
         username: &str,
     ) -> Option<crate::message::peer::PeerInfo> {
         self.peer_infos.get(username).cloned()
+    }
+
+    /// Remove and return what `username` said about itself.
+    ///
+    /// The taking half of [`Self::peer_info`], for a host that drains answers
+    /// rather than polling them.
+    #[must_use]
+    pub fn peer_info_taken(
+        &mut self,
+        username: &str,
+    ) -> Option<crate::message::peer::PeerInfo> {
+        self.peer_infos.remove(username)
     }
 
     /// Drop what we hold about `username`, so a poll after a fresh request

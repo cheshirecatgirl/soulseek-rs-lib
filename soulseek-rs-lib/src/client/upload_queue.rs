@@ -231,6 +231,21 @@ impl ClientContext {
         place_in_queue(&self.upload_queue, downloader, filename)
     }
 
+    /// Replace the set of people whose requests are not served.
+    pub fn set_ignored(&mut self, users: Vec<String>) {
+        self.ignored = users.into_iter().collect();
+        // Anything of theirs already waiting goes too, or ignoring someone
+        // would only take effect for requests they had not made yet.
+        self.upload_queue
+            .retain(|queued| !self.ignored.contains(&queued.downloader));
+    }
+
+    /// Whether this person's requests are being ignored.
+    #[must_use]
+    pub fn is_ignored(&self, username: &str) -> bool {
+        self.ignored.contains(username)
+    }
+
     /// Replace the privileged set, re-ranking anyone already waiting: the list
     /// arrives at login, which can be after a peer has queued something.
     pub fn set_privileged_users(&mut self, users: Vec<String>) {
@@ -448,6 +463,26 @@ mod context_tests {
             offered(&mut ctx, &mut token).is_empty(),
             "pumping again must not oversubscribe the slots"
         );
+    }
+
+    #[test]
+    fn ignoring_someone_reaches_what_they_already_asked_for() {
+        let (mut ctx, _token) = context(1);
+        ask(&mut ctx, "wanted", "a.flac");
+        ask(&mut ctx, "unwanted", "b.flac");
+        assert_eq!(ctx.upload_queue.len(), 2);
+
+        ctx.set_ignored(vec!["unwanted".to_string()]);
+
+        assert_eq!(
+            ctx.upload_queue.len(),
+            1,
+            "ignoring somebody has to reach what they already asked for, or it \
+             only applies to requests they had not made yet"
+        );
+        assert_eq!(ctx.upload_queue[0].downloader, "wanted");
+        assert!(ctx.is_ignored("unwanted"));
+        assert!(!ctx.is_ignored("wanted"));
     }
 
     #[test]

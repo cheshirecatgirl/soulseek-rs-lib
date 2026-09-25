@@ -10,6 +10,7 @@ use std::time::Duration;
 use crate::message::server::MessageFactory;
 use crate::peer::ConnectionType;
 use crate::trace;
+use crate::utils::throttle::take_upload_allowance;
 
 /// Connect to the downloader's file listener and stream `path`'s bytes.
 ///
@@ -93,8 +94,19 @@ pub fn serve_file(
         if read == 0 {
             break;
         }
-        stream.write_all(&buffer[..read])?;
-        bytes_sent.fetch_add(read as u64, Ordering::Relaxed);
+        // Written in whatever slices the ceiling allows rather than all at
+        // once: with no limit set this is one slice and the same as before.
+        let mut written = 0;
+        while written < read {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            let slice = take_upload_allowance(read - written);
+            let end = written + slice;
+            stream.write_all(&buffer[written..end])?;
+            bytes_sent.fetch_add(slice as u64, Ordering::Relaxed);
+            written = end;
+        }
         streamed += read as u64;
     }
     stream.flush()?;

@@ -32,9 +32,11 @@ pub use shared_file_list::{
 };
 pub use transfer_request::TransferRequest;
 pub use transfer_response::TransferResponse;
-pub use upload_denied::UploadDeniedHandler;
+pub use upload_denied::{
+    UploadDeniedHandler, build_upload_denied, plain as plain_denial,
+};
 pub use upload_failed::UploadFailedHandler;
 pub use user_info::{
-    PeerInfo, UserInfoRequest, UserInfoResponseHandler, build_user_info,
-    build_user_info_request,
+    MAX_PICTURE, PeerInfo, UserInfoRequest, UserInfoResponseHandler,
+    build_user_info, build_user_info_request,
 };
