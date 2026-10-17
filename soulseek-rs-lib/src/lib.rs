@@ -38,7 +38,7 @@ pub use message::peer::{SharedDirectory, SharedFileEntry};
 pub use peer::{ConnectionType, ParseConnectionTypeError};
 pub use types::{
     ClientVersion, DownloadStatus, File, Recommendation, RoomEvent, RoomInfo,
-    RoomTicker, Search, SearchResult, SessionLoss, SimilarUser, Transfer,
-    UploadInfo, UploadStatus, UserInfo, UserInterests, UserPresence, UserStats,
-    UserStatus,
+    RoomTicker, Search, SearchLimits, SearchResult, SessionLoss, SimilarUser,
+    Transfer, UploadInfo, UploadStatus, UserInfo, UserInterests, UserPresence,
+    UserStats, UserStatus,
 };

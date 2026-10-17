@@ -60,6 +60,83 @@ impl Client {
         }
     }
 
+    /// Cap the combined upload rate in bytes per second; 0 lifts the cap.
+    /// Uploads already running slow down too.
+    pub fn set_upload_speed_limit(&self, bytes_per_second: u64) {
+        if let Ok(ctx) = self.context.read_safe() {
+            ctx.upload_speed_limit.set(bytes_per_second);
+        }
+    }
+
+    /// Set the profile text and picture peers see when they ask who we are.
+    ///
+    /// # Errors
+    /// [`SoulseekRs::InvalidMessage`](crate::error::SoulseekRs::InvalidMessage)
+    /// for a picture over [`MAX_PICTURE`](crate::message::peer::MAX_PICTURE),
+    /// the size past which we drop a peer's own picture unread.
+    pub fn set_profile(
+        &self,
+        text: &str,
+        picture: Option<Vec<u8>>,
+    ) -> crate::error::Result<()> {
+        let max = crate::message::peer::MAX_PICTURE;
+        if picture.as_ref().is_some_and(|bytes| bytes.len() > max) {
+            return Err(crate::error::SoulseekRs::InvalidMessage(format!(
+                "a profile picture can be at most {max} bytes"
+            )));
+        }
+        let mut ctx = self.context.write_safe()?;
+        text.clone_into(&mut ctx.profile_text);
+        ctx.profile_picture = picture;
+        Ok(())
+    }
+
+    /// Replace the set of people we ignore. Their searches, browses and queue
+    /// requests get no answer at all, and anything of theirs already queued
+    /// is dropped.
+    pub fn set_ignored(&self, users: Vec<String>) {
+        if let Ok(mut ctx) = self.context.write_safe() {
+            ctx.set_ignored(users);
+        }
+    }
+
+    /// Replace the set of friends. They see folders shared with friends only
+    /// and are not held to the queue limits.
+    pub fn set_friends(&self, users: Vec<String>) {
+        if let Ok(mut ctx) = self.context.write_safe() {
+            ctx.set_friends(users);
+        }
+    }
+
+    /// How much one person may have waiting in the upload queue. Past either limit a
+    /// request is refused with "Too many files" or "Too many megabytes".
+    pub fn set_queue_limits(
+        &self,
+        limits: crate::client::upload_rules::QueueLimits,
+    ) {
+        if let Ok(mut ctx) = self.context.write_safe() {
+            ctx.set_queue_limits(limits);
+        }
+    }
+
+    /// Tell everyone waiting in the queue "Pending shutdown." and refuse
+    /// later requests the same way. Call it before [`Client::disconnect`],
+    /// while peers can still be reached.
+    pub fn announce_shutdown(&self) {
+        let waiting = match self.context.write_safe() {
+            Ok(mut ctx) => ctx.begin_shutdown(),
+            Err(_) => return,
+        };
+        for (downloader, filename) in waiting {
+            Self::deny_upload(
+                &self.context,
+                &downloader,
+                &filename,
+                crate::client::upload_rules::PENDING_SHUTDOWN,
+            );
+        }
+    }
+
     /// Drop everything `username` was queued or offered, then hand their slot to
     /// whoever is next.
     pub(crate) fn release_upload_slots(
@@ -133,6 +210,7 @@ impl Client {
                 started: std::time::Instant::now(),
             },
         );
+        let limit = ctx.upload_speed_limit.clone();
         drop(ctx);
         let own = own_username.to_string();
         let real_path = job.real_path;
@@ -146,6 +224,7 @@ impl Client {
                 &real_path,
                 &bytes_sent,
                 &cancel,
+                &limit,
             );
             let streamed = result.as_ref().ok().copied();
             let status = match &result {
@@ -189,6 +268,7 @@ impl Client {
         client_context: Arc<RwLock<ClientContext>>,
         username: &str,
         filename: Option<&str>,
+        reason: Option<&str>,
     ) {
         let failed_tokens = match client_context.read_safe() {
             Ok(context) => {
@@ -210,7 +290,11 @@ impl Client {
                     context.downloads.update_status(
                         token,
                         DownloadStatus::Failed(Some(
-                            "The upload failed on the other side".to_string(),
+                            reason
+                                .unwrap_or(
+                                    "The upload failed on the other side",
+                                )
+                                .to_string(),
                         )),
                     );
                     context.downloads.remove(token);

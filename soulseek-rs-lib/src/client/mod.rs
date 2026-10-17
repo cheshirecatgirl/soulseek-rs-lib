@@ -164,8 +164,9 @@ fn build_search_response(
     speed: u32,
     queue_length: u32,
     excluded_phrases: &[String],
+    friend: bool,
 ) -> Option<crate::message::Message> {
-    let matches = shares.search(query);
+    let matches = shares.search_for(query, friend);
     if matches.is_empty() {
         return None;
     }
@@ -220,6 +221,9 @@ pub struct ClientSettings {
     /// Directories whose files are shared with (uploaded to) other peers.
     /// Empty means nothing is shared.
     pub shared_directories: Vec<String>,
+    /// Which of [`Self::shared_directories`] are shared with friends only
+    /// (see [`Client::set_friends`]).
+    pub friends_only_directories: Vec<String>,
     /// Whether to serve children in the distributed search network: peers
     /// hang from us with a `D` connection and we pass every search we receive
     /// down to them. Off by default — it costs a socket and the network's
@@ -257,6 +261,7 @@ impl Default for ClientSettings {
             enable_listen: true,
             listen_port: DEFAULT_LISTEN_PORT,
             shared_directories: Vec::new(),
+            friends_only_directories: Vec::new(),
             accept_children: false,
             version: ClientVersion::default(),
         }
@@ -280,7 +285,11 @@ pub enum ClientOperation {
         obfuscation_type: u32,
         obfuscated_port: u16,
     },
-    UploadFailed(String, String),
+    UploadFailed {
+        username: String,
+        filename: String,
+        reason: Option<String>,
+    },
     PlaceInQueueUpdate {
         username: String,
         filename: String,
@@ -385,6 +394,8 @@ pub enum ClientOperation {
     PrivilegedUsers(Vec<String>),
     /// Seconds of our own privileges left.
     OwnPrivileges(u32),
+    /// The server confirmed the new password.
+    PasswordChanged(String),
     /// A peer asked where their queued file sits.
     PlaceInQueueRequested {
         requester_key: String,
@@ -482,16 +493,21 @@ pub struct ClientContext {
     parent_min_speed: u32,
     parent_speed_ratio: u32,
     searches: HashMap<String, Search>,
+    search_limits: crate::types::SearchLimits,
     private_messages: Vec<UserMessage>,
     /// Correlation tokens for server-brokered (firewalled) connections, mapping
     /// a token we sent in a ConnectToPeer to the peer we expect back.
     pending_connect_tokens: HashMap<u32, (String, Instant)>,
     max_peers: Arc<AtomicUsize>,
     pub(crate) download_speed_limit: Arc<RateLimit>,
+    /// One budget for every upload, so more slots never means more bandwidth.
+    pub(crate) upload_speed_limit: Arc<RateLimit>,
     /// Files we share with peers (read-only after connect).
     pub shares: Arc<Shares>,
     /// The directories the current share index was built from.
     pub shared_directories: Vec<String>,
+    /// Which of them are shared with friends only.
+    pub friends_only_directories: Vec<String>,
     /// Peer listen addresses learned from GetPeerAddress responses.
     peer_addresses: HashMap<String, (String, u32)>,
     /// Peer messages waiting for a control connection to that peer, and
@@ -559,8 +575,18 @@ pub struct ClientContext {
     /// Everyone the server listed as privileged (code 69). They sort ahead of
     /// other peers in [`Self::upload_queue`].
     privileged_users: HashSet<String>,
+    /// People we do not answer at all.
+    ignored: HashSet<String>,
+    /// People who may have friends-only shares and skip the queue limits.
+    friends: HashSet<String>,
+    /// How much one person may have waiting in the queue.
+    queue_limits: upload_rules::QueueLimits,
+    /// Refuse every request with "Pending shutdown." until the next connect.
+    shutting_down: bool,
     /// Seconds of our own privileges left (code 92), once we have asked.
     own_privileges: Option<u32>,
+    /// The last new password the server confirmed (code 142).
+    confirmed_password: Option<String>,
     /// Phrases the server excludes from the search network (code 160). Files
     /// whose path carries one are left out of the replies we send.
     excluded_search_phrases: Vec<String>,
@@ -570,6 +596,9 @@ pub struct ClientContext {
     upload_seq: u64,
     /// How many uploads may be in flight at once.
     upload_slots: usize,
+    /// What a peer is told when it asks who we are.
+    profile_text: String,
+    profile_picture: Option<Vec<u8>>,
     /// Bytes per second of the last completed upload, advertised in search
     /// replies; zero until one has finished.
     last_upload_speed: u32,
@@ -642,6 +671,7 @@ pub struct Client {
     password: String,
     version: ClientVersion,
     shared_directories: Vec<String>,
+    friends_only_directories: Vec<String>,
     server_handle: Option<ActorHandle<ServerMessage>>,
     context: Arc<RwLock<ClientContext>>,
     session: SessionWatch,
@@ -681,6 +711,7 @@ impl Client {
             password: settings.password,
             version: settings.version,
             shared_directories: settings.shared_directories,
+            friends_only_directories: settings.friends_only_directories,
             server_handle: None,
             session: SessionWatch::default(),
             listener_stopped: Arc::new(AtomicBool::new(false)),
@@ -824,28 +855,37 @@ impl Client {
     /// # Errors
     /// Returns [`SoulseekRs::NotConnected`] if the client is not connected.
     pub fn set_shared_directories(&self, dirs: Vec<String>) -> Result<()> {
-        let roots: Vec<std::path::PathBuf> = dirs
-            .iter()
-            .filter(|dir| !dir.trim().is_empty())
-            .map(std::path::PathBuf::from)
-            .collect();
-        let shares = if roots.is_empty() {
-            Shares::empty()
-        } else {
-            Shares::scan_many(&roots)
-        };
+        let friends_only = self
+            .context
+            .read_safe()
+            .map(|ctx| ctx.friends_only_directories.clone())
+            .unwrap_or_default();
+        self.set_shares(dirs, friends_only)
+    }
+
+    /// [`Client::set_shared_directories`], also saying which of `dirs` are
+    /// shared with friends only. Those are left out of what anyone else is
+    /// sent, and out of the counts the server is told.
+    ///
+    /// # Errors
+    /// Returns [`SoulseekRs::NotConnected`] if the client is not connected.
+    pub fn set_shares(
+        &self,
+        dirs: Vec<String>,
+        friends_only: Vec<String>,
+    ) -> Result<()> {
+        let shares = scan_shares(&dirs, &friends_only);
         info!(
-            "Now sharing {} files in {} folders from {} directories",
+            "Now sharing {} files in {} folders",
             shares.file_count(),
             shares.folder_count(),
-            roots.len()
         );
-        let folder_count = shares.folder_count();
-        let file_count = shares.file_count();
+        let (folder_count, file_count) = shares.open_counts();
         {
             let mut ctx = self.context.write_safe()?;
             ctx.shares = Arc::new(shares);
             ctx.shared_directories = dirs;
+            ctx.friends_only_directories = friends_only;
         }
         self.send_server_message(
             crate::message::server::MessageFactory::build_shared_folders_message(
@@ -853,6 +893,20 @@ impl Client {
                 file_count,
             ),
         )
+    }
+}
+
+/// Scan `dirs` into a share index, marking those also in `friends_only`.
+fn scan_shares(dirs: &[String], friends_only: &[String]) -> Shares {
+    let roots: Vec<(std::path::PathBuf, bool)> = dirs
+        .iter()
+        .filter(|dir| !dir.trim().is_empty())
+        .map(|dir| (std::path::PathBuf::from(dir), friends_only.contains(dir)))
+        .collect();
+    if roots.is_empty() {
+        Shares::empty()
+    } else {
+        Shares::scan_marked(&roots)
     }
 }
 
@@ -867,6 +921,7 @@ mod rooms;
 mod search;
 mod social;
 mod upload_queue;
+pub mod upload_rules;
 mod uploads;
 
 pub use cancel::CancelHandle;

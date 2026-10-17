@@ -43,7 +43,13 @@ pub fn build_file_search_response(
     payload
         .write_int8(slots)
         .write_int32(speed)
-        .write_int32(queue_length);
+        .write_int32(queue_length)
+        // An unknown integer official clients send as 0, then the results
+        // shared with friends only, as a locked list. It stays empty: a friend
+        // gets those results among the rest, and nobody else is told they
+        // exist.
+        .write_int32(0)
+        .write_int32(0);
 
     let compressed = deflate(&payload.get_data());
     Message::new()
@@ -135,6 +141,36 @@ fn build_file_search_response_roundtrips_through_the_decoder() {
     assert_eq!(result.files[1].size, 456);
     assert!(result.files[1].attribs.is_empty());
     assert_eq!(result.slots, 1);
+}
+
+#[test]
+fn results_for_friends_only_arrive_locked_with_the_queue_length() {
+    let mut payload = Message::new();
+    payload.write_string("sharer").write_int32(5).write_int32(1);
+    payload
+        .write_int8(1)
+        .write_string("open\\a.mp3")
+        .write_int64(1)
+        .write_string("")
+        .write_int32(0);
+    payload.write_int8(1).write_int32(100).write_int32(12);
+    payload.write_int32(0).write_int32(1);
+    payload
+        .write_int8(1)
+        .write_string("kept\\b.mp3")
+        .write_int64(2)
+        .write_string("")
+        .write_int32(0);
+    let mut message = Message::new_with_data(deflate(&payload.get_data()));
+
+    let result = SearchResult::new_from_message(&mut message).unwrap();
+    assert_eq!(result.queue_length, 12);
+    let names: Vec<(&str, bool)> = result
+        .files
+        .iter()
+        .map(|f| (f.name.as_str(), f.locked))
+        .collect();
+    assert_eq!(names, vec![("open\\a.mp3", false), ("kept\\b.mp3", true)]);
 }
 
 #[test]

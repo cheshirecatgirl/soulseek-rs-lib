@@ -94,11 +94,12 @@ impl Client {
                             }
                         };
                         let result_token = search_result.token;
+                        let limits = context.search_limits;
 
                         // Find the search with matching token
                         for search in context.searches.values_mut() {
                             if search.token == result_token {
-                                search.accept(search_result);
+                                search.accept_within(search_result, limits);
                                 break;
                             }
                         }
@@ -221,11 +222,16 @@ impl Client {
                             );
                         }
                     }
-                    ClientOperation::UploadFailed(username, filename) => {
+                    ClientOperation::UploadFailed {
+                        username,
+                        filename,
+                        reason,
+                    } => {
                         Self::process_failed_uploads(
                             client_context.clone(),
                             &username,
                             Some(&filename),
+                            reason.as_deref(),
                         );
                     }
                     ClientOperation::PlaceInQueueUpdate {
@@ -502,6 +508,11 @@ impl Client {
                             ctx.own_privileges = Some(seconds);
                         }
                     }
+                    ClientOperation::PasswordChanged(password) => {
+                        if let Ok(mut ctx) = client_context.write_safe() {
+                            ctx.confirmed_password = Some(password);
+                        }
+                    }
                     ClientOperation::Recommendations {
                         global,
                         recommended,
@@ -648,8 +659,17 @@ impl Client {
                             &client_context,
                             &requester_key,
                             |ctx| {
+                                // Someone we ignore is shown an empty share,
+                                // as Nicotine+ shows a banned user.
+                                let dirs = if ctx.is_ignored(&requester_key) {
+                                    Vec::new()
+                                } else {
+                                    ctx.shares.directories_for(
+                                        ctx.is_friend(&requester_key),
+                                    )
+                                };
                                 crate::message::peer::build_shared_file_list(
-                                    &ctx.shares.directories(),
+                                    &dirs,
                                 )
                             },
                         );
@@ -660,6 +680,8 @@ impl Client {
                             &requester_key,
                             |ctx| {
                                 crate::message::peer::build_user_info(
+                                    &ctx.profile_text,
+                                    ctx.profile_picture.as_deref(),
                                     ctx.upload_slots as u32,
                                     ctx.upload_queue.len() as u32,
                                     ctx.has_free_upload_slot(),
@@ -678,12 +700,18 @@ impl Client {
                             &client_context,
                             &requester_key,
                             |ctx| {
-                                let dirs: Vec<_> = ctx
-                                    .shares
-                                    .directories()
-                                    .into_iter()
-                                    .filter(|dir| dir.name == folder)
-                                    .collect();
+                                let dirs: Vec<_> =
+                                    if ctx.is_ignored(&requester_key) {
+                                        Vec::new()
+                                    } else {
+                                        ctx.shares
+                                            .directories_for(
+                                                ctx.is_friend(&requester_key),
+                                            )
+                                            .into_iter()
+                                            .filter(|dir| dir.name == folder)
+                                            .collect()
+                                    };
                                 crate::message::peer::build_folder_contents(
                                     token, &folder, &dirs,
                                 )

@@ -67,7 +67,7 @@ Message names and codes follow the Soulseek protocol as implemented by
 | 137 | CancelRoomOwnership | yes | e2e — the owner disbands the room |
 | 139 / 140 | RoomMembershipGranted / Revoked | yes | e2e — the guest is told |
 | 141 | EnableRoomInvitations | yes | e2e — set before an invitation |
-| 142 | ChangePassword | yes | e2e — the next login needs the new one |
+| 142 | ChangePassword | yes | e2e — the next login needs the new one; unit — the server's confirmation |
 | 143 / 144 | AddRoomOperator / Remove | yes | e2e — the guest is promoted |
 | 145 / 146 | RoomOperatorshipGranted / Revoked | yes | e2e — the guest is told |
 | 147 | CancelRoomOperatorship | yes | e2e — an operator stands down |
@@ -100,7 +100,7 @@ ParentIP (73), UserPrivileged (122), NotifyPrivileges (124), AckNotifyPrivileges
 | 43 | QueueUpload | yes | e2e — queueing, slots, privileged peers |
 | 44 | PlaceInQueueResponse | yes | e2e — answering, and asking |
 | 46 | UploadFailed | yes | e2e — the download fails promptly |
-| 50 | UploadDenied | yes | e2e — the download fails promptly |
+| 50 | UploadDenied | yes | e2e — the download fails promptly; unit — the protocol's refusal reasons, sent and read |
 | 51 | PlaceInQueueRequest | yes | e2e — both directions |
 
 ## Distributed messages
@@ -117,16 +117,17 @@ Serving children is off by default; see `accept_children` in the README.
 ## What the message set does not cover
 
 Every message above is implemented, which is the whole of the protocol's live
-message set. Three things in the protocol are not messages of their own and are
+message set. Two things in the protocol are not messages of their own and are
 still open, so "complete" means the message set rather than every byte the
 protocol describes:
 
-- **Privately shared (locked) results.** `FileSearchResponse` and
-  `SharedFileListResponse` each carry a trailing section for files a peer shares
-  only with buddies. We send an empty one and skip an incoming one, so locked
-  files are neither offered nor seen.
 - **Obfuscated connections.** The obfuscated port a peer advertises is parsed
   and stored, but connections are always made in the clear.
 - **Adopting a firewalled child.** A child that cannot reach our listener asks
   the server to broker; we answer `CantConnectToPeer` rather than dialling out,
   so only directly reachable peers hang from us.
+
+Locked results, the trailing section of `FileSearchResponse` and
+`SharedFileListResponse` for files a peer shares only with friends, are read
+and marked `locked`. Friends-only folders shared from here go to friends
+unlocked and to nobody else, so the section we send is always empty.

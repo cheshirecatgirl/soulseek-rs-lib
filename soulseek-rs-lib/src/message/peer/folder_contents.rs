@@ -82,12 +82,13 @@ pub fn parse_folder_contents(
     let mut body = decompress_body(message, crate::utils::zlib::MAX_INFLATED)?;
     let token = body.read_int32();
     let folder = body.read_string();
-    Some((token, folder, read_directories(&mut body)))
+    Some((token, folder, read_directories(&mut body, false)))
 }
 
 #[test]
 fn a_folder_listing_round_trips() {
     let dirs = vec![SharedDirectory {
+        locked: false,
         name: "music\\album".to_string(),
         files: vec![
             SharedFileEntry {

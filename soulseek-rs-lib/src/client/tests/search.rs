@@ -12,9 +12,18 @@ fn build_search_response_matches_shares_and_echoes_token() {
     std::fs::write(dir.join("probe_xyzzy.bin"), b"data").unwrap();
     let shares = Shares::scan(&dir).unwrap();
 
-    let response =
-        build_search_response(&shares, "me", 99, "xyzzy", true, 0, 0, &[])
-            .expect("a matching share yields a response");
+    let response = build_search_response(
+        &shares,
+        "me",
+        99,
+        "xyzzy",
+        true,
+        0,
+        0,
+        &[],
+        false,
+    )
+    .expect("a matching share yields a response");
     let mut decoded =
         crate::message::Message::new_with_data(response.get_buffer());
     decoded.set_pointer(8);
@@ -24,8 +33,18 @@ fn build_search_response_matches_shares_and_echoes_token() {
     assert!(result.files.iter().any(|f| f.name.contains("probe_xyzzy")));
 
     assert!(
-        build_search_response(&shares, "me", 1, "nomatch", true, 0, 0, &[])
-            .is_none()
+        build_search_response(
+            &shares,
+            "me",
+            1,
+            "nomatch",
+            true,
+            0,
+            0,
+            &[],
+            false
+        )
+        .is_none()
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -110,8 +129,18 @@ fn a_file_the_server_excludes_is_left_out_of_a_reply() {
     let shares = Shares::scan(&dir).unwrap();
 
     assert!(
-        build_search_response(&shares, "me", 1, "xyzzy", true, 0, 0, &[])
-            .is_some(),
+        build_search_response(
+            &shares,
+            "me",
+            1,
+            "xyzzy",
+            true,
+            0,
+            0,
+            &[],
+            false
+        )
+        .is_some(),
         "with no exclusions the file is offered"
     );
     assert!(
@@ -124,6 +153,7 @@ fn a_file_the_server_excludes_is_left_out_of_a_reply() {
             0,
             0,
             &["spam".to_string()],
+            false,
         )
         .is_none(),
         "an excluded phrase in the path, matched case-insensitively, \
@@ -139,6 +169,7 @@ fn a_file_the_server_excludes_is_left_out_of_a_reply() {
             0,
             0,
             &["unrelated".to_string()],
+            false,
         )
         .is_some(),
         "an exclusion the path does not carry changes nothing"
@@ -158,6 +189,7 @@ fn a_file_the_server_excludes_is_left_out_of_a_reply() {
             0,
             0,
             &ctx.excluded_search_phrases(),
+            false,
         )
         .is_none(),
         "a capitalised phrase from the server still withholds the file"

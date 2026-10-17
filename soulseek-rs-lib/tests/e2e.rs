@@ -125,6 +125,7 @@ impl TestServer {
 
     fn settings(&self, username: &str, password: &str) -> ClientSettings {
         ClientSettings {
+            friends_only_directories: Vec::new(),
             username: username.to_string(),
             password: password.to_string(),
             server_address: PeerAddress::new(self.host.clone(), self.port),
@@ -4408,6 +4409,33 @@ fn a_changed_password_is_what_the_next_login_needs() {
 }
 
 #[test]
+fn a_client_logs_back_in_with_the_password_the_server_confirmed() {
+    let server = server_or_skip!();
+
+    let user = "e2e_pwconfirm_user";
+    let mut client = Client::with_settings(server.settings(user, "first-pw"));
+    client.connect().expect("connect");
+    assert!(client.login().expect("login registers the account"));
+
+    client
+        .change_password("second-pw")
+        .expect("change password");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while client.confirmed_password().as_deref() != Some("second-pw") {
+        assert!(Instant::now() < deadline, "the server confirms the change");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Same client, settings still holding the old password.
+    client.disconnect();
+    client.connect().expect("reconnect");
+    assert!(
+        matches!(client.login(), Ok(true)),
+        "the confirmed password is the one sent"
+    );
+}
+
+#[test]
 fn a_brokered_dial_we_cannot_complete_tells_the_waiting_peer() {
     // The peer asks the server to broker a connection to us but is itself
     // unreachable — it advertises a port nothing listens on. Our dial fails,
@@ -4583,6 +4611,7 @@ fn phrases_the_server_excludes_are_kept_for_our_replies() {
     let (host, port) = addr.rsplit_once(':').expect("stub addr");
 
     let mut client = Client::with_settings(ClientSettings {
+        friends_only_directories: Vec::new(),
         username: "e2e_excluded".to_string(),
         password: "pw".to_string(),
         server_address: PeerAddress::new(
@@ -5602,6 +5631,7 @@ fn a_dropped_client_has_released_its_listener_port_when_drop_returns() {
 
     for round in 0..25 {
         let mut client = Client::with_settings(ClientSettings {
+            friends_only_directories: Vec::new(),
             username: "e2e_port_release_now".to_string(),
             password: "pw".to_string(),
             server_address: PeerAddress::new("127.0.0.1".to_string(), 1),
@@ -5629,6 +5659,7 @@ fn a_cancelled_client_never_binds_its_port() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let port = free_port().expect("a port to hold");
     let mut client = Client::with_settings(ClientSettings {
+        friends_only_directories: Vec::new(),
         username: "e2e_cancelled_bind".to_string(),
         password: "pw".to_string(),
         server_address: PeerAddress::new("127.0.0.1".to_string(), 1),
@@ -5651,6 +5682,7 @@ fn a_cancel_ends_a_login_waiting_for_its_verdict_and_nothing_follows_it() {
     let server =
         std::net::TcpListener::bind("127.0.0.1:0").expect("a silent server");
     let mut client = Client::with_settings(ClientSettings {
+        friends_only_directories: Vec::new(),
         username: "e2e_cancelled_login".to_string(),
         password: "pw".to_string(),
         server_address: PeerAddress::new(

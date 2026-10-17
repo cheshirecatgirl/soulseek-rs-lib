@@ -121,6 +121,13 @@ impl Client {
         Ok(token)
     }
 
+    /// How much of each search to keep from here on; 0 lifts either cap.
+    pub fn set_search_limits(&self, limits: crate::types::SearchLimits) {
+        if let Ok(mut ctx) = self.context.write_safe() {
+            ctx.search_limits = limits;
+        }
+    }
+
     /// The phrases the server excludes from the search network (code 160), as
     /// last announced. Files whose path carries one are left out of the
     /// replies this client sends. Empty until the server has said.

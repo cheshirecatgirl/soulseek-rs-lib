@@ -547,6 +547,7 @@ impl SeederState {
     /// Everything we hold, the answer to a GetShareFileList.
     fn send_listing(&self, p: &mut TcpStream, shared: bool) -> bool {
         let dir = SharedDirectory {
+            locked: false,
             name: format!("stress\\{}", self.name),
             files: entries(&self.files),
         };
@@ -1030,6 +1031,7 @@ fn main() {
 
     // --- client under test ------------------------------------------------
     let mut client = Client::with_settings(ClientSettings {
+        friends_only_directories: Vec::new(),
         username: client_name,
         password: "pw".to_string(),
         server_address: PeerAddress::new(server.host.clone(), server.port),

@@ -10,6 +10,7 @@ use std::time::Duration;
 use crate::message::server::MessageFactory;
 use crate::peer::ConnectionType;
 use crate::trace;
+use crate::utils::rate_limit::RateLimit;
 
 /// Connect to the downloader's file listener and stream `path`'s bytes.
 ///
@@ -18,12 +19,14 @@ use crate::trace;
 /// download is matched by token), then the downloader sends an 8-byte
 /// START_DOWNLOAD offset before we stream the file.
 ///
-/// `bytes_sent` is updated as the transfer progresses, and setting `cancel`
-/// aborts the stream with an [`io::ErrorKind::Interrupted`] error. Returns the
-/// bytes streamed by this call, which a resumed transfer's prefix is not.
+/// `bytes_sent` is updated as the transfer progresses, `limit` paces it, and
+/// setting `cancel` aborts the stream with an [`io::ErrorKind::Interrupted`]
+/// error. Returns the bytes streamed by this call, which a resumed transfer's
+/// prefix is not.
 ///
 /// # Errors
 /// Returns any I/O error opening the file or talking to the peer.
+#[allow(clippy::too_many_arguments)]
 pub fn serve_file(
     host: &str,
     port: u32,
@@ -32,6 +35,7 @@ pub fn serve_file(
     path: &Path,
     bytes_sent: &AtomicU64,
     cancel: &AtomicBool,
+    limit: &RateLimit,
 ) -> io::Result<u64> {
     let mut file = File::open(path)?;
 
@@ -93,8 +97,16 @@ pub fn serve_file(
         if read == 0 {
             break;
         }
-        stream.write_all(&buffer[..read])?;
-        bytes_sent.fetch_add(read as u64, Ordering::Relaxed);
+        let mut written = 0;
+        while written < read {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            let end = written + limit.take(read - written);
+            stream.write_all(&buffer[written..end])?;
+            bytes_sent.fetch_add((end - written) as u64, Ordering::Relaxed);
+            written = end;
+        }
         streamed += read as u64;
     }
     stream.flush()?;
@@ -110,7 +122,7 @@ pub fn serve_file(
 
 #[cfg(test)]
 mod tests {
-    use super::serve_file;
+    use super::{RateLimit, serve_file};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -167,6 +179,7 @@ mod tests {
                 &path,
                 &sent_counter,
                 &cancel,
+                &RateLimit::default(),
             )
         });
         (bytes_sent, uploader)
@@ -272,6 +285,7 @@ mod tests {
                 &path,
                 &AtomicU64::new(0),
                 &AtomicBool::new(false),
+                &RateLimit::default(),
             );
             let _ = result_tx.send(result);
         });
