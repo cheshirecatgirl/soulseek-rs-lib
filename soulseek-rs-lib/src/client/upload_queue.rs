@@ -25,7 +25,7 @@ const OFFER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A queued upload that has just been given a slot, ready to be offered to the
 /// peer that asked for it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UploadOffer {
     pub requester_key: String,
     pub token: u32,
@@ -174,7 +174,20 @@ impl ClientContext {
         (self.peer_registry.clone(), offers)
     }
 
-    /// Take the queued-upload states recorded since the last call.
+    /// Record a change in an upload's state for whoever reads
+    /// [`Self::take_upload_events`]. A transfer can start and finish
+    /// between two looks at [`super::Client::uploads`], and one that is
+    /// only ever sampled is never seen running, or done.
+    pub fn record_upload(&mut self, info: UploadInfo) {
+        self.upload_events.push(info);
+        if self.upload_events.len() > MAX_UPLOAD_EVENTS {
+            let excess = self.upload_events.len() - MAX_UPLOAD_EVENTS;
+            self.upload_events.drain(..excess);
+        }
+    }
+
+    /// Take the upload states recorded since the last call: who is waiting,
+    /// and every upload that started, finished, failed or was cancelled.
     pub fn take_upload_events(&mut self) -> Vec<UploadInfo> {
         std::mem::take(&mut self.upload_events)
     }
@@ -289,7 +302,34 @@ impl ClientContext {
                 ),
             });
         }
+        // A held offer for an expired job would never be sent: let it go
+        // with the job, so a peer that never connects holds nothing.
+        let uploads = &self.uploads;
+        self.held_offers.retain(|_, offers| {
+            offers.retain(|offer| uploads.contains_key(&offer.token));
+            !offers.is_empty()
+        });
         !stale.is_empty()
+    }
+
+    /// Keep an offer that found no connection to its downloader, to send
+    /// once one comes up.
+    pub fn hold_offer(&mut self, offer: UploadOffer) {
+        self.held_offers
+            .entry(offer.requester_key.clone())
+            .or_default()
+            .push(offer);
+    }
+
+    /// The offers held for `username` that are still waiting: one that
+    /// expired meanwhile has no job left to serve and is dropped here.
+    pub fn take_held_offers(&mut self, username: &str) -> Vec<UploadOffer> {
+        self.held_offers
+            .remove(username)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|offer| self.uploads.contains_key(&offer.token))
+            .collect()
     }
 
     /// The peer accepted the offer for `token`; it may still take a while to
@@ -544,6 +584,66 @@ mod context_tests {
         ctx.uploads.clear();
         assert_eq!(offered(&mut ctx, &mut token), ["second"]);
         assert_eq!(ctx.place_in_queue("second", "f.mp3"), None);
+    }
+
+    /// The pump's offers themselves, for a test that holds one.
+    fn offers(
+        ctx: &mut ClientContext,
+        token: &mut impl FnMut() -> u32,
+    ) -> Vec<super::UploadOffer> {
+        ctx.pump_uploads(token).1
+    }
+
+    #[test]
+    fn an_offer_with_no_connection_is_held_until_one_comes_up() {
+        let (mut ctx, mut token) = context(1);
+        ask(&mut ctx, "racer", "f.mp3");
+        let offer = offers(&mut ctx, &mut token).remove(0);
+        ctx.hold_offer(offer);
+
+        assert_eq!(ctx.take_held_offers("someone else"), []);
+        let held = ctx.take_held_offers("racer");
+        assert_eq!(held.len(), 1, "the offer waits for its own peer");
+        assert_eq!(held[0].virtual_path, "f.mp3");
+        assert!(ctx.take_held_offers("racer").is_empty(), "and is sent once");
+    }
+
+    #[test]
+    fn a_held_offer_goes_with_its_upload_when_that_expires() {
+        let (mut ctx, mut token) = context(1);
+        ask(&mut ctx, "never", "f.mp3");
+        let offer = offers(&mut ctx, &mut token).remove(0);
+        ctx.hold_offer(offer);
+
+        assert!(
+            ctx.expire_stale_offers(std::time::Instant::now() + OFFER_TIMEOUT)
+        );
+        assert_eq!(
+            ctx.take_held_offers("never"),
+            [],
+            "nothing is sent for an upload already given up on"
+        );
+    }
+
+    #[test]
+    fn an_upload_that_starts_and_ends_between_two_looks_is_still_reported() {
+        let (mut ctx, _) = context(1);
+        for status in [UploadStatus::InProgress, UploadStatus::Completed] {
+            ctx.record_upload(crate::types::UploadInfo {
+                username: "quick".into(),
+                filename: "f.mp3".into(),
+                size: 4096,
+                bytes_sent: 4096,
+                status,
+                speed_bytes_per_sec: 0.0,
+            });
+        }
+        let seen: Vec<UploadStatus> = ctx
+            .take_upload_events()
+            .into_iter()
+            .map(|event| event.status)
+            .collect();
+        assert_eq!(seen, [UploadStatus::InProgress, UploadStatus::Completed]);
     }
 
     #[test]

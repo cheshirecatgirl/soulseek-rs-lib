@@ -3,6 +3,7 @@ use super::{
     PeerMessage, RwLock, RwLockExt, ServerMessage, collect_failed_tokens,
     debug, error, next_connect_token, next_upload_token, thread,
 };
+use crate::actor::peer_registry::PeerRegistry;
 use crate::message::server::MessageFactory;
 use crate::peer::{ConnectionType, upload_peer};
 use crate::types::UploadStatus;
@@ -173,8 +174,57 @@ impl Client {
             return;
         };
         for offer in offers {
-            let _ = registry.send_to_peer(
+            let sent = registry.send_to_peer(
                 &offer.requester_key,
+                PeerMessage::ServeUpload {
+                    token: offer.token,
+                    filename: offer.virtual_path.clone(),
+                    size: offer.size,
+                },
+            );
+            if sent.is_ok() {
+                continue;
+            }
+            // Nobody to send it on: the connection the peer queued over
+            // was replaced or closed, as when a peer races a direct and a
+            // brokered connection and drops the loser. Dropped, the offer
+            // would leave the peer waiting and the slot taken until it
+            // timed out, so it is held, the peer's address asked for, and
+            // sent when the connection comes up.
+            let username = offer.requester_key.clone();
+            let server = match client_context.write_safe() {
+                Ok(mut ctx) => {
+                    ctx.hold_offer(offer);
+                    ctx.server_sender.clone()
+                }
+                Err(e) => {
+                    error!("[client] hold upload offer: {}", e);
+                    continue;
+                }
+            };
+            if let Some(server) = server {
+                let _ = server.send(ServerMessage::GetPeerAddress(username));
+            }
+        }
+    }
+
+    /// Send the upload offers held for `username` now that a connection to
+    /// them is up.
+    pub(crate) fn send_held_offers(
+        client_context: &Arc<RwLock<ClientContext>>,
+        registry: &PeerRegistry,
+        username: &str,
+    ) {
+        let offers = match client_context.write_safe() {
+            Ok(mut ctx) => ctx.take_held_offers(username),
+            Err(e) => {
+                error!("[client] take held offers: {}", e);
+                return;
+            }
+        };
+        for offer in offers {
+            let _ = registry.send_to_peer(
+                username,
                 PeerMessage::ServeUpload {
                     token: offer.token,
                     filename: offer.virtual_path,
@@ -201,18 +251,17 @@ impl Client {
         };
         let bytes_sent = Arc::new(AtomicU64::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
-        ctx.active_uploads.insert(
-            token,
-            ActiveUpload {
-                username: job.downloader.clone(),
-                filename: job.virtual_path.clone(),
-                size: job.size,
-                bytes_sent: bytes_sent.clone(),
-                cancel: cancel.clone(),
-                status: UploadStatus::InProgress,
-                started: std::time::Instant::now(),
-            },
-        );
+        let upload = ActiveUpload {
+            username: job.downloader.clone(),
+            filename: job.virtual_path.clone(),
+            size: job.size,
+            bytes_sent: bytes_sent.clone(),
+            cancel: cancel.clone(),
+            status: UploadStatus::InProgress,
+            started: std::time::Instant::now(),
+        };
+        ctx.record_upload(upload.info());
+        ctx.active_uploads.insert(token, upload);
         let limit = ctx.upload_speed_limit.clone();
         drop(ctx);
         let own = own_username.to_string();
@@ -355,6 +404,8 @@ impl Client {
         {
             error!("[client] upload {token} to {}: {reason}", upload.username);
             upload.status = UploadStatus::Failed(reason.to_string());
+            let failed = upload.info();
+            ctx.record_upload(failed);
         }
         Self::pump_upload_queue(client_context);
     }
@@ -384,6 +435,7 @@ impl Client {
         {
             let secs = upload.started.elapsed().as_secs_f64();
             upload.status = status;
+            let finished = upload.info();
             if let Some(bytes) = streamed
                 && secs > 0.0
             {
@@ -391,6 +443,7 @@ impl Client {
                 ctx.last_upload_speed = speed;
                 report = ctx.server_sender.clone().map(|s| (s, speed));
             }
+            ctx.record_upload(finished);
         }
         // The server folds each finished upload's rate into the average
         // speed it shows other users for us.

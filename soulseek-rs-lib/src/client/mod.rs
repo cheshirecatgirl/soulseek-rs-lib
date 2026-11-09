@@ -144,6 +144,26 @@ struct ActiveUpload {
     started: Instant,
 }
 
+impl ActiveUpload {
+    /// What the upload looks like from outside, as of now.
+    fn info(&self) -> crate::types::UploadInfo {
+        let bytes_sent =
+            self.bytes_sent.load(std::sync::atomic::Ordering::Relaxed);
+        crate::types::UploadInfo {
+            username: self.username.clone(),
+            filename: self.filename.clone(),
+            size: self.size,
+            bytes_sent,
+            speed_bytes_per_sec: upload_speed(
+                &self.status,
+                bytes_sent,
+                self.started,
+            ),
+            status: self.status.clone(),
+        }
+    }
+}
+
 /// Transfer rate of an in-progress upload, in bytes per second. Finished,
 /// cancelled and failed uploads report zero, matching how a download reports
 /// its speed only while running.
@@ -542,6 +562,10 @@ pub struct ClientContext {
     /// token we sent in `ConnectToPeer(F)`; the peer quotes it back in a
     /// `PierceFirewall` and we serve over that socket instead.
     brokered_uploads: HashMap<u32, BrokeredUpload>,
+    /// Upload offers that found no connection to their downloader, kept
+    /// until one comes up. A peer that queued with us over a connection
+    /// since replaced, or closed, is still waiting for the offer.
+    held_offers: HashMap<String, Vec<upload_queue::UploadOffer>>,
     /// Shared-file listings received from peers we browsed.
     browse_results: HashMap<String, Vec<SharedDirectory>>,
     /// One-folder listings received from peers, keyed by peer and folder.
@@ -824,24 +848,7 @@ impl Client {
                 tokens.sort_unstable();
                 let mut all: Vec<crate::types::UploadInfo> = tokens
                     .into_iter()
-                    .map(|token| {
-                        let upload = &ctx.active_uploads[token];
-                        let bytes_sent = upload
-                            .bytes_sent
-                            .load(std::sync::atomic::Ordering::Relaxed);
-                        crate::types::UploadInfo {
-                            username: upload.username.clone(),
-                            filename: upload.filename.clone(),
-                            size: upload.size,
-                            bytes_sent,
-                            speed_bytes_per_sec: upload_speed(
-                                &upload.status,
-                                bytes_sent,
-                                upload.started,
-                            ),
-                            status: upload.status.clone(),
-                        }
-                    })
+                    .map(|token| ctx.active_uploads[token].info())
                     .collect();
                 all.extend(ctx.queued_uploads());
                 all

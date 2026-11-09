@@ -54,6 +54,7 @@ impl ClientContext {
             active_uploads: HashMap::new(),
             pending_serves: HashMap::new(),
             brokered_uploads: HashMap::new(),
+            held_offers: HashMap::new(),
             browse_results: HashMap::new(),
             folder_contents: HashMap::new(),
             peer_infos: HashMap::new(),

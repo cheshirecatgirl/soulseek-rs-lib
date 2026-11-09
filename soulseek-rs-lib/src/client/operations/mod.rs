@@ -426,6 +426,11 @@ impl Client {
                                     PeerMessage::SendMessage(message),
                                 );
                             }
+                            Self::send_held_offers(
+                                &client_context,
+                                &registry,
+                                &username,
+                            );
                         }
                     }
                     operation @ ClientOperation::IncomingSearch { .. } => {
