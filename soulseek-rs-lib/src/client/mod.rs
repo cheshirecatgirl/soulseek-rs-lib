@@ -517,6 +517,10 @@ pub struct ClientContext {
     active_uploads: HashMap<u32, ActiveUpload>,
     /// Upload tokens waiting for the downloader's address to be resolved.
     pending_serves: HashMap<String, Vec<u32>>,
+    /// Upload offers that found no connection to their downloader, kept
+    /// until one comes up. A peer that queued with us over a connection
+    /// since replaced, or closed, is still waiting for the offer.
+    held_offers: HashMap<String, Vec<upload_queue::UploadOffer>>,
     /// Shared-file listings received from peers we browsed.
     browse_results: HashMap<String, Vec<SharedDirectory>>,
     /// One-folder listings received from peers, keyed by peer and folder.
