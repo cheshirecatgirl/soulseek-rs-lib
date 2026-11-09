@@ -58,6 +58,7 @@ impl Subject {
         let server_addr =
             idle_server.local_addr().expect("idle server address");
         let mut client = Client::with_settings(ClientSettings {
+            friends_only_directories: Vec::new(),
             username: username.to_string(),
             password: "unused".to_string(),
             server_address: PeerAddress::new(

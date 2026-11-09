@@ -1,7 +1,6 @@
 use crate::actor::{Actor, ActorHandle, ConnectionState};
 use crate::client::{CancelHandle, ClientOperation};
 use crate::dispatcher::MessageDispatcher;
-use crate::message::server::AdminMessageHandler;
 use crate::message::server::CantConnectToPeerHandler;
 use crate::message::server::CheckPrivilegesHandler;
 use crate::message::server::ConnectToPeerHandler;
@@ -26,6 +25,7 @@ use crate::message::server::UserJoinedRoomHandler;
 use crate::message::server::UserLeftRoomHandler;
 use crate::message::server::WatchUserHandler;
 use crate::message::server::WishListIntervalHandler;
+use crate::message::server::{AdminMessageHandler, ChangePasswordHandler};
 use crate::message::server::{
     CantCreateRoomHandler, OwnRoomStandingHandler, RoomMembersHandler,
     RoomOperatorsHandler, RoomRosterChangeHandler,
@@ -77,6 +77,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum ServerMessage {
     ProcessRead,
     LoginStatus(bool),
+    /// The server refused the login, with its reason and, for
+    /// `INVALIDUSERNAME`, what is wrong with the name.
+    LoginRejected {
+        reason: String,
+        detail: Option<String>,
+    },
     /// The server is closing this connection: the same username logged in
     /// elsewhere.
     Relogged,
@@ -103,6 +109,8 @@ pub enum ServerMessage {
     PrivilegedUsers(Vec<String>),
     /// Seconds of our own privileges left (code 92).
     OwnPrivileges(u32),
+    /// The server confirmed a password change (code 142).
+    PasswordChanged(String),
     /// Ask the server for the answer to the above.
     CheckPrivileges,
     /// A search the server distributed to us from another user; if it matches
@@ -409,6 +417,7 @@ impl ServerActor {
         handlers.register_handler(LoginHandler);
         handlers.register_handler(ReloggedHandler);
         handlers.register_handler(AdminMessageHandler);
+        handlers.register_handler(ChangePasswordHandler);
         handlers.register_handler(PossibleParentsHandler);
         handlers.register_handler(ResetDistributedHandler);
         handlers.register_handler(EmbeddedMessageHandler);

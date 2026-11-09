@@ -9,6 +9,9 @@ pub struct File {
     pub name: String,
     pub size: u64,
     pub attribs: HashMap<u32, u32>,
+    /// Shared only with the owner's friends: the peer says it exists, and
+    /// will refuse it to anyone else who asks.
+    pub locked: bool,
 }
 /// The client version sent to the server on login.
 ///
@@ -62,6 +65,8 @@ pub struct SearchResult {
     pub files: Vec<File>,
     pub slots: u8,
     pub speed: u32,
+    /// How many uploads the peer has waiting, as it reported them.
+    pub queue_length: u32,
     pub username: String,
 }
 
@@ -92,20 +97,117 @@ pub const MAX_SEARCH_FILES: usize = 10_000;
 /// peer has plenty.
 pub const MAX_SEARCH_REPLY_FILES: usize = 300;
 
+/// How much of a search to keep. 0 lifts either cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchLimits {
+    pub responses: usize,
+    pub files: usize,
+}
+
+impl Default for SearchLimits {
+    fn default() -> Self {
+        Self {
+            responses: MAX_SEARCH_RESPONSES,
+            files: MAX_SEARCH_FILES,
+        }
+    }
+}
+
 impl Search {
     /// Store one peer's response, unless this search already holds enough.
     ///
     /// The last accepted response may carry the total past
     /// [`MAX_SEARCH_FILES`]; responses are kept whole rather than truncated.
     pub fn accept(&mut self, result: SearchResult) {
+        self.accept_within(result, SearchLimits::default());
+    }
+
+    /// [`Search::accept`] with caps of the caller's choosing.
+    pub fn accept_within(
+        &mut self,
+        result: SearchResult,
+        limits: SearchLimits,
+    ) {
         // ponytail: counts files linearly per call — bounded by the response
         // cap; a running total would mean a new pub field on Search.
         let files: usize =
             self.results.iter().map(|result| result.files.len()).sum();
-        if self.results.len() < MAX_SEARCH_RESPONSES && files < MAX_SEARCH_FILES
-        {
+        let room_for_response =
+            limits.responses == 0 || self.results.len() < limits.responses;
+        let room_for_files = limits.files == 0 || files < limits.files;
+        if room_for_response && room_for_files {
             self.results.push(result);
         }
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    fn result_with(files: usize) -> SearchResult {
+        SearchResult {
+            username: "peer".to_string(),
+            token: 1,
+            files: (0..files)
+                .map(|n| File {
+                    username: "peer".to_string(),
+                    name: format!("{n}.flac"),
+                    size: 1,
+                    attribs: HashMap::new(),
+                    locked: false,
+                })
+                .collect(),
+            slots: 1,
+            speed: 0,
+            queue_length: 0,
+        }
+    }
+
+    fn empty() -> Search {
+        Search {
+            token: 1,
+            results: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_response_cap_holds() {
+        let mut search = empty();
+        let limits = SearchLimits {
+            responses: 2,
+            files: 0,
+        };
+        for _ in 0..5 {
+            search.accept_within(result_with(1), limits);
+        }
+        assert_eq!(search.results.len(), 2);
+    }
+
+    #[test]
+    fn the_response_that_crosses_the_file_cap_is_kept_whole_and_last() {
+        let mut search = empty();
+        let limits = SearchLimits {
+            responses: 0,
+            files: 3,
+        };
+        search.accept_within(result_with(4), limits);
+        search.accept_within(result_with(1), limits);
+        assert_eq!(search.results.len(), 1);
+        assert_eq!(search.results[0].files.len(), 4);
+    }
+
+    #[test]
+    fn zero_lifts_both_caps() {
+        let mut search = empty();
+        let limits = SearchLimits {
+            responses: 0,
+            files: 0,
+        };
+        for _ in 0..(MAX_SEARCH_RESPONSES + 100) {
+            search.accept_within(result_with(1), limits);
+        }
+        assert_eq!(search.results.len(), MAX_SEARCH_RESPONSES + 100);
     }
 }
 
@@ -119,47 +221,66 @@ impl SearchResult {
 
         let username = message.read_string();
         let token = message.read_int32();
-        let n_files = message.read_int32();
-        let mut files: Vec<File> = Vec::new();
-        for _ in 0..n_files {
-            // Stop if a hostile n_files count outruns the payload, so a bogus
-            // length can't spin us into a huge allocation loop.
-            if message.get_pointer() >= message.get_size() {
-                break;
-            }
-            message.read_int8();
-            let name = message.read_string();
-            let size = message.read_int64();
-            message.read_string();
-            let n_attribs = message.read_int32();
-            let mut attribs: HashMap<u32, u32> = HashMap::new();
-
-            for _ in 0..n_attribs {
-                // Each attribute is two int32s (8 bytes); guard against a bogus
-                // count since read_int32 does not advance past the buffer end.
-                if message.get_pointer() + 8 > message.get_size() {
-                    break;
-                }
-                attribs.insert(message.read_int32(), message.read_int32());
-            }
-            files.push(File {
-                username: username.clone(),
-                name,
-                size,
-                attribs,
-            });
-        }
+        let mut files = read_files(&mut message, &username, false);
         let slots = message.read_int8();
         let speed = message.read_int32();
+        let queue_length = message.read_int32();
+        // After the queue length, clients that share with friends only add an
+        // unknown integer and then the results only friends may download.
+        if message.get_pointer() + 8 <= message.get_size() {
+            message.read_int32();
+            files.extend(read_files(&mut message, &username, true));
+        }
 
         Ok(Self {
             token,
             files,
             slots,
             speed,
+            queue_length,
             username,
         })
     }
+}
+
+/// One counted run of result files, as code 9 carries them twice.
+fn read_files(
+    message: &mut Message,
+    username: &str,
+    locked: bool,
+) -> Vec<File> {
+    let n_files = message.read_int32();
+    let mut files: Vec<File> = Vec::new();
+    for _ in 0..n_files {
+        // Stop if a hostile n_files count outruns the payload, so a bogus
+        // length can't spin us into a huge allocation loop.
+        if message.get_pointer() >= message.get_size() {
+            break;
+        }
+        message.read_int8();
+        let name = message.read_string();
+        let size = message.read_int64();
+        message.read_string();
+        let n_attribs = message.read_int32();
+        let mut attribs: HashMap<u32, u32> = HashMap::new();
+
+        for _ in 0..n_attribs {
+            // Each attribute is two int32s (8 bytes); guard against a bogus
+            // count since read_int32 does not advance past the buffer end.
+            if message.get_pointer() + 8 > message.get_size() {
+                break;
+            }
+            attribs.insert(message.read_int32(), message.read_int32());
+        }
+        files.push(File {
+            username: username.to_string(),
+            name,
+            size,
+            attribs,
+            locked,
+        });
+    }
+    files
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +310,8 @@ pub struct Download {
     pub sender: Sender<DownloadStatus>,
     pub queue_position: Option<u32>,
     pub metadata: DownloadMetadata,
+    /// Set for a preview: stop after this many bytes.
+    pub preview_bytes: Option<u64>,
 }
 
 impl Download {

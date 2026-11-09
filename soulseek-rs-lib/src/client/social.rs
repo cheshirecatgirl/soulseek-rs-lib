@@ -182,6 +182,19 @@ impl Client {
         self.send_to_peer_or_queue(username, request)
     }
 
+    /// Remove and return what a peer said about itself, if it has answered.
+    /// Unlike [`Client::peer_info`], each answer is handed over once.
+    #[must_use]
+    pub fn take_peer_info(
+        &self,
+        username: &str,
+    ) -> Option<crate::message::peer::PeerInfo> {
+        self.context
+            .write_safe()
+            .ok()
+            .and_then(|mut ctx| ctx.take_peer_info(username))
+    }
+
     /// What `username` last said about itself.
     #[must_use]
     pub fn peer_info(
@@ -515,7 +528,9 @@ impl Client {
         ))
     }
 
-    /// Change our account password (code 142).
+    /// Change the account password (code 142). It has taken once
+    /// [`Client::confirmed_password`] returns it, and later logins on this
+    /// client use it.
     ///
     /// # Errors
     /// [`crate::SoulseekRs::NotConnected`] when there is no server connection.
@@ -523,6 +538,15 @@ impl Client {
         self.send_server_message(MessageFactory::build_change_password(
             password,
         ))
+    }
+
+    /// The last new password the server confirmed, if any.
+    #[must_use]
+    pub fn confirmed_password(&self) -> Option<String> {
+        self.context
+            .read_safe()
+            .ok()
+            .and_then(|ctx| ctx.confirmed_password.clone())
     }
 
     /// Send one private message to several users at once (code 149). Each
